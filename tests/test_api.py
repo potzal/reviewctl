@@ -205,11 +205,10 @@ def test_client_review_accepts_a_registered_openrouter_profile(tmp_path: Path) -
         'execution = "remote"\n'
     )
     (tmp_path / "a.py").write_text("value = 1\n")
+    approved = '{"verdict":"approved","findings":[],"reviewedFiles":["a.py"]}'
     client = ReviewClient.from_project(
         tmp_path,
-        transports={
-            "openrouter": FakeTransport('{"verdict":"approved","findings":[],"reviewedFiles":["a.py"]}')
-        },
+        transports={"openrouter": FakeTransport(approved)},
     )
 
     result = client.review(ReviewRequest(prompt="review", files=(tmp_path / "a.py",)))
