@@ -413,10 +413,37 @@ def _record_github_publication_events(
         )
 
 
+def _github_review_transports(project: Path, transport: str | None) -> Any:
+    """Build the transport map for a github review.
+
+    Returns None to use the default project transports (pi + codex), which keeps
+    OpenRouter exploratory. When --transport openrouter is requested explicitly,
+    inject the OpenRouter transport so an openrouter-routed profile becomes
+    formal for this review — the CI advisory path. This is the only way to
+    promote OpenRouter, matching the _INJECTED_FORMAL_PROJECT_TRANSPORTS gate in
+    reviewctl.api.
+    """
+    if transport != "openrouter":
+        return None
+    from reviewctl.codex_project_transport import CodexProjectTransport
+    from reviewctl.openrouter_project_transport import OpenRouterProjectTransport
+    from reviewctl.pi_transport import PiTransport
+
+    return {
+        "codex": CodexProjectTransport(project),
+        "openrouter": OpenRouterProjectTransport(),
+        "pi": PiTransport(),
+    }
+
+
 def github_review_project(args: Any) -> int:
     project = _project_path(args.project)
     try:
-        client = ReviewClient.from_project(project)
+        transports = _github_review_transports(project, getattr(args, "transport", None))
+        if transports is None:
+            client = ReviewClient.from_project(project)
+        else:
+            client = ReviewClient.from_project(project, transports=transports)
         snapshot = LocalGitHubSource(project).resolve(PullRequestRef(args.repo, args.pr))
     except GitHubSourceError as error:
         return _diagnostic_result(error.diagnostic, args.format)
@@ -893,6 +920,16 @@ def add_project_commands(commands: Any) -> None:
     github_review.add_argument("--format", choices=("text", "json"), default="text")
     github_review.add_argument("--publish", action="store_true")
     github_review.add_argument("--publish-event", choices=("comment",), default="comment")
+    github_review.add_argument(
+        "--transport",
+        choices=("pi", "codex", "openrouter"),
+        default=None,
+        help=(
+            "Explicitly enable a transport for this review. OpenRouter is "
+            "exploratory by default; pass --transport openrouter to make an "
+            "openrouter-routed profile formal (CI advisory path)."
+        ),
+    )
     github_review.set_defaults(handler=github_review_project)
 
     status = commands.add_parser("status", help="show project review status")

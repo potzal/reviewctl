@@ -195,6 +195,45 @@ def test_client_review_returns_typed_result_and_journal(tmp_path: Path) -> None:
     ]
 
 
+def test_client_review_accepts_a_registered_openrouter_profile(tmp_path: Path) -> None:
+    # A project profile may route to openrouter for formal review as long as the
+    # openrouter transport is registered (github review / CI advisory path).
+    (tmp_path / "reviewctl.toml").write_text(
+        '[project]\nprivacy_mode = "private"\n'
+        "[profiles.default]\n"
+        'routes = ["openrouter:deepseek/deepseek-v4.1"]\n'
+        'execution = "remote"\n'
+    )
+    (tmp_path / "a.py").write_text("value = 1\n")
+    approved = '{"verdict":"approved","findings":[],"reviewedFiles":["a.py"]}'
+    client = ReviewClient.from_project(
+        tmp_path,
+        transports={"openrouter": FakeTransport(approved)},
+    )
+
+    result = client.review(ReviewRequest(prompt="review", files=(tmp_path / "a.py",)))
+
+    # Accepted, not route_invalid — the openrouter route is honored.
+    assert result.status == "accepted"
+
+
+def test_client_review_rejects_openrouter_profile_when_transport_absent(tmp_path: Path) -> None:
+    # If the openrouter transport is not registered, a formal openrouter route is
+    # rejected — the injection is gated on registration (fail-closed).
+    (tmp_path / "reviewctl.toml").write_text(
+        '[project]\nprivacy_mode = "private"\n'
+        "[profiles.default]\n"
+        'routes = ["openrouter:deepseek/deepseek-v4.1"]\n'
+        'execution = "remote"\n'
+    )
+    (tmp_path / "a.py").write_text("value = 1\n")
+    client = ReviewClient.from_project(tmp_path, transports={"pi": FakeTransport()})
+
+    result = client.review(ReviewRequest(prompt="review", files=(tmp_path / "a.py",)))
+
+    assert result.status == "route_invalid"
+
+
 @pytest.mark.parametrize(
     ("outcome", "expected_status"),
     [
