@@ -553,9 +553,11 @@ called a provider or produced a formal receipt.
 | [Issue #4](https://github.com/potzal/reviewctl/issues/4) | **Vigente; explicit non-formal fallback still needed.** | `reviewctl explore` is a Pi, read-only material path, not the requested local Codex/Luna fallback with source hashes and `local-fallback` label. Define a project-side, source-hashed exploratory artifact and recovery procedure first; it must say `not a formal review` and never satisfy a required receipt gate. A new core transport is not justified by this issue alone. |
 | [Issue #16](https://github.com/potzal/reviewctl/issues/16) | **Resolved and closed.** | [#30](https://github.com/potzal/reviewctl/pull/30) stores private literal-prompt bytes and source path/hash; the run → receipt → offline structural verify regression passes. `verify` does not reread the current prompt bytes, so file integrity requires a separate hash comparison. |
 
-The #29 thread had one issue comment about a separate Potzal PR #21 at this
-snapshot, and no inline review comments or submitted reviews. That comment
-does not supply review of this product direction.
+At the original `00579f9` snapshot, the #29 thread's only issue comment
+concerned a separate Potzal PR #21. Later progress comments recorded advisory
+scope review and interim CI states; the final CI evidence above supersedes
+those interim states. None of those comments is a formal review or product
+decision.
 
 ## Independent advisory scope review
 
