@@ -499,7 +499,7 @@ missing. Do not promote a model based on vendor claims or one demonstration.
 
 | Stage | Dependency and bounded deliverable | Exit evidence |
 | --- | --- | --- |
-| 0. Core reconciliation | Preserve unique #12 implementation, investigate its high-thinking Pi capture/canary, reproduce/fix #3 and #16, decide #4 non-formal fallback, settle #12/#19 policy conflict; do not redo #26/#28 | [Separate code PR #30](https://github.com/potzal/reviewctl/pull/30), CI selector at 100% branch coverage without exclusions, focused regressions, offline receipt verification; high-thinking real subprocess canary and explicit policy disposition still needed |
+| 0. Core reconciliation | Preserve unique #12 implementation, investigate its high-thinking Pi capture/canary, reproduce/fix #3 and #16, decide #4 non-formal fallback, settle #12/#19 policy conflict; do not redo #26/#28 | [Separate code PR #30](https://github.com/potzal/reviewctl/pull/30) merged with 100% branch coverage, focused regressions and offline receipt verification; high-thinking real subprocess canary, #4 fallback choice and explicit #12/#19 policy disposition still needed |
 | 1. Optional manual work pilot | Stage 0 and product-boundary approval; one sibling adapter to existing issue/document references and current reviewctl | Six acceptance criteria above, replay/recovery fixtures and one traceable end-to-end example; no lease/multiuser/automatic permission |
 | 2. Evidence-based adapters | Stage 1 demonstrates a need; compare existing issue/queue/wiki tools and document backends, then run quality/cost experiments | Recorded trade-off, reproducible corpus and metrics, privacy review, provider-neutral adapter contract; abandon if existing tools suffice |
 | 3. Bounded workers and sharing, only if justified | Stage 2 evidence and separate security/product decision | Explicit worker/`ChangeAttempt` contract, budgets, concurrency and trust protocol; optional Potzal federation or UI cannot alter local receipts |
@@ -510,11 +510,13 @@ Stages 1–3 are options, not scheduled commitments. The existing
 remain their respective historical plans; this document does not mark their
 future items complete.
 
-## Open-work disposition (snapshot at main `6509de9`, 2026-09-27)
+## Open-work disposition (updated at main `3b943ef`, 2026-09-27)
 
-These are recommendations, not closures. Diffs, comments, tests and main were
-compared; #26 and #28 are already integrated. A new document cannot itself
-resolve an older implementation or policy conflict.
+Diffs, comments, tests and main were compared; #26 and #28 were already
+integrated. #30 subsequently merged and #3/#16 were closed with exact-head and
+post-merge CI evidence. The remaining rows are recommendations, not silent
+closures. This proposal cannot itself resolve an older product or policy
+conflict.
 
 Reproduction and verification trace: on main
 [`6509de9`](https://github.com/potzal/reviewctl/commit/6509de91550425b4d8e6c49f09743d553224c001)
@@ -531,15 +533,25 @@ failures; `tests/test_github_cli.py` OpenRouter opt-in path) were first run
 against main behavior and exposed #16's `receipt-source` failure and #3's
 missing evidence pointer. After the separate fix, the same local selector
 reported 2,209 passed, 1 deselected and 100.00% branch coverage on macOS.
-This is local evidence, not a claimed provider canary or remote CI approval.
+That is the original reproduction trace, not the final integration result.
+Final [#30 head `9e3cb02`](https://github.com/potzal/reviewctl/commit/9e3cb0283f588de4d862aac9503e0af1aa4d05ff)
+passed [CI run 36310096958](https://github.com/potzal/reviewctl/actions/runs/36310096958)
+with 2,215 passed, 1 skipped, 1 deselected and 100.00% branch coverage.
+It was squash-merged to main as
+[`3b943ef`](https://github.com/potzal/reviewctl/commit/3b943ef277f2e51dd6cacc018a1a22f8f5b097c4);
+[post-merge CI run 36310282311](https://github.com/potzal/reviewctl/actions/runs/36310282311)
+also passed. The final local macOS selector reported 2,216 passed,
+1 deselected and 100.00% branch coverage. Two independent read-only advisory
+reviews of the final #30 diff found no remaining actionable issues; neither
+called a provider or produced a formal receipt.
 
 | Item | Disposition now | Evidence and next action |
 | --- | --- | --- |
-| [PR #12](https://github.com/potzal/reviewctl/pull/12) | **Partially resolved; keep open.** | Main has much Pi/thinking behavior but its CLI thinking whitespace normalization and Pi request-evidence pointer were absent. [Code PR #30](https://github.com/potzal/reviewctl/pull/30) preserves those; it is not yet integrated. #12 also identifies a high-thinking Pi bounded-capture failure and asks for a real subprocess canary; current unit fixtures do **not** establish that this is fixed. Investigate and run a bounded canary separately before closing. Its narrow review-only scope conflicts with #29's sibling/work direction; obtain an explicit product decision. |
+| [PR #12](https://github.com/potzal/reviewctl/pull/12) | **Partially resolved; keep open.** | Main now includes its CLI thinking whitespace normalization and Pi request-evidence pointer through [#30](https://github.com/potzal/reviewctl/pull/30). #12 also identifies a high-thinking Pi bounded-capture failure and asks for a real subprocess canary; current unit fixtures do **not** establish that this is fixed. Investigate and run a bounded canary separately before closing. Its narrow review-only scope conflicts with #29's sibling/work direction; obtain an explicit product decision. |
 | [PR #19](https://github.com/potzal/reviewctl/pull/19) | **Vigente; keep open.** | Its revised head blocks when GitHub Codex is unavailable and preserves exact-head review plus finding disposition. Evaluate the provider-neutral policy above with owners; do not weaken the current project gate or close #19 by labeling it superseded. |
-| [Issue #3](https://github.com/potzal/reviewctl/issues/3) | **Partially resolved.** | Main classifies the macOS Codex isolation failure as `transport-failed`, but a reproduced failed run loses command context, stdout/stderr and output-state evidence after cleanup. [Code PR #30](https://github.com/potzal/reviewctl/pull/30) contains the fix/regressions, not yet integrated; close only after integration. |
+| [Issue #3](https://github.com/potzal/reviewctl/issues/3) | **Resolved and closed.** | [#30](https://github.com/potzal/reviewctl/pull/30) retains private command/stdout/stderr/output-state evidence, classifies preflight and launch errors as transport failures, guarantees auth-home cleanup, and does not fabricate a response when no final output exists. Focused regressions and both CI runs above passed. No real Codex provider call is claimed. |
 | [Issue #4](https://github.com/potzal/reviewctl/issues/4) | **Vigente; explicit non-formal fallback still needed.** | `reviewctl explore` is a Pi, read-only material path, not the requested local Codex/Luna fallback with source hashes and `local-fallback` label. Define a project-side, source-hashed exploratory artifact and recovery procedure first; it must say `not a formal review` and never satisfy a required receipt gate. A new core transport is not justified by this issue alone. |
-| [Issue #16](https://github.com/potzal/reviewctl/issues/16) | **Vigente.** | Main's accepted literal `run --prompt` receipt fails `verify` with `receipt-source` because there is no persisted source path. [Code PR #30](https://github.com/potzal/reviewctl/pull/30) stores private prompt bytes and tests offline verification, but is not integrated; do not close yet. |
+| [Issue #16](https://github.com/potzal/reviewctl/issues/16) | **Resolved and closed.** | [#30](https://github.com/potzal/reviewctl/pull/30) stores private literal-prompt bytes and source path/hash; the run → receipt → offline structural verify regression passes. `verify` does not reread the current prompt bytes, so file integrity requires a separate hash comparison. |
 
 The #29 thread had one issue comment about a separate Potzal PR #21 at this
 snapshot, and no inline review comments or submitted reviews. That comment

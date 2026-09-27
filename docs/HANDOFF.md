@@ -8,10 +8,12 @@
 historical snapshot, not proof of today's implementation or CI state. The
 [agentic work direction proposal](AGENTIC-CONTROL-PLANE-DIRECTION.md) contains
 a separate, unadopted staged roadmap and a reconciliation of PRs #12/#19 and
-issues #3/#4/#16. It recommends preserving the existing review kernel while
-testing a sibling coordination layer only after the core gates are stable and
-the product boundary is agreed. Do not treat that proposal as completion of
-any phase below or as authority to merge/change the current review gate.
+issues #3/#4/#16. Core fixes for #3/#16 merged in #30 and those issues are
+closed; #4 and the #12/#19 decisions remain open. The proposal recommends
+preserving the existing review kernel while testing a sibling coordination
+layer only after the core gates are stable and the product boundary is agreed.
+Do not treat that proposal as completion of any phase below or as authority to
+merge or change the current review gate.
 
 ## 2026-08-23 product iteration
 
