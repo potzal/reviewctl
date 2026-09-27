@@ -852,6 +852,35 @@ def test_github_front_door_setup_errors(
     assert fragment in payload["diagnostic"]["message"]
 
 
+def test_github_openrouter_opt_in_injects_transports_before_project_setup(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    write_config(tmp_path)
+    observed = []
+
+    class FailingClient:
+        @classmethod
+        def from_project(cls, project_dir, *, transports):
+            observed.append((project_dir, transports))
+            raise JournalOperationError(
+                Diagnostic("journal_corrupt", "project journal unavailable")
+            )
+
+    monkeypatch.setattr(project_cli, "ReviewClient", FailingClient)
+
+    result = project_cli.github_review_project(
+        github_args(tmp_path, transport="openrouter", publish=False)
+    )
+
+    assert result == 5
+    assert len(observed) == 1
+    project_dir, transports = observed[0]
+    assert project_dir == tmp_path.resolve()
+    assert set(transports) == {"codex", "openrouter", "pi"}
+    assert transports["codex"].project_dir == tmp_path.resolve()
+    assert json.loads(capsys.readouterr().out)["diagnostic"]["code"] == "journal_corrupt"
+
+
 def test_github_front_door_materialization_review_and_plan_errors(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

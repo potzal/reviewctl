@@ -640,12 +640,16 @@ def load_route_profile(
         settings[key] = value
     thinking = profile_config.get("thinking") if isinstance(profile_config, dict) else None
     if thinking is not None:
-        if not isinstance(thinking, str) or thinking not in PI_THINKING_LEVELS:
+        normalized_thinking = thinking.strip() if isinstance(thinking, str) else thinking
+        if (
+            not isinstance(normalized_thinking, str)
+            or normalized_thinking not in PI_THINKING_LEVELS
+        ):
             parser.error(
                 f"profile {profile!r}: thinking must be one of "
                 f"{', '.join(sorted(PI_THINKING_LEVELS))}"
             )
-        settings["thinking"] = thinking
+        settings["thinking"] = normalized_thinking
     reasoning_effort = (
         profile_config.get("reasoning_effort") if isinstance(profile_config, dict) else None
     )
@@ -4110,7 +4114,9 @@ def invoke_codex(
     timeout_seconds: int,
     workspace: Path,
     prepared_contract: PreparedContract | None = None,
-) -> tuple[int, str, PersistedResponse]:
+    evidence_dir: Path | None = None,
+    evidence_parent_identity: tuple[int, int] | None = None,
+) -> tuple[int, str, PersistedResponse | None]:
     """Run Codex against the isolated snapshots and recover its final response."""
     isolation: CodexIsolation | None = None
     try:
@@ -4119,11 +4125,38 @@ def invoke_codex(
             isolation = isolation_context.__enter__()
         else:
             isolation_context = None
-    except RuntimeError as error:
+    except (RuntimeError, OSError) as error:
+        if evidence_dir is not None:
+            write_private_exclusive(
+                evidence_dir / "request.json",
+                canonical_json(
+                    {"command": None, "model": model, "responseContract": response_contract}
+                ),
+                label="Codex request evidence",
+                expected_parent_identity=evidence_parent_identity,
+            )
+            write_private_exclusive(
+                evidence_dir / "stdout.log",
+                b"",
+                label="Codex stdout evidence",
+                expected_parent_identity=evidence_parent_identity,
+            )
+            write_private_exclusive(
+                evidence_dir / "stderr.log",
+                str(error).encode(),
+                label="Codex stderr evidence",
+                expected_parent_identity=evidence_parent_identity,
+            )
+            write_private_exclusive(
+                evidence_dir / "output-state.json",
+                canonical_json({"exists": False}),
+                label="Codex output state",
+                expected_parent_identity=evidence_parent_identity,
+            )
         return (
             127,
             str(error),
-            PersistedResponse("", None, None, None, "", None, "openai-codex", ""),
+            None,
         )
 
     temporary_root = isolation.home if isolation else workspace
@@ -4147,52 +4180,89 @@ def invoke_codex(
         "--output-last-message",
         str(output_path),
     ]
-    if schema := response_schema(
-        response_contract,
-        codex=source_roots is not None,
-        prepared_contract=prepared_contract,
-    ):
-        if prepared_contract is not None:
-            # Codex Structured Outputs requires every declared property. Project
-            # only that constraint; keep the portable contract and schema intact.
-            schema = {**schema, "required": list(schema["properties"])}
-        schema_path = output_path.with_name("codex-response.schema.json")
-        schema_path.write_bytes(canonical_json(schema))
-        command.extend(["--output-schema", str(schema_path)])
-    command.append(
-        codex_prompt(
-            prompt,
-            response_contract,
-            review_declaration_required=source_roots is not None,
-            prepared_contract=prepared_contract,
-        )
-    )
-    if isolation:
-        # Codex's own seatbelt cannot be nested inside macOS sandbox-exec.
-        # The outer profile already denies the original proprietary checkout;
-        # use Codex's documented external-sandbox mode for the inner process.
-        command = ["sandbox-exec", "-f", str(isolation.profile), *command]
-
-    started = time.monotonic()
-    timed_out = False
-    process_environment = (
-        isolation.environment
-        if isolation
-        else codex_process_environment(
-            os.environ,
-            {"HOME": os.environ.get("HOME") or str(account_home())},
-        )
-    )
-
     try:
-        process = subprocess.Popen(
-            command,
-            cwd=workspace,
-            env=process_environment,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
+        if schema := response_schema(
+            response_contract,
+            codex=source_roots is not None,
+            prepared_contract=prepared_contract,
+        ):
+            if prepared_contract is not None:
+                # Codex Structured Outputs requires every declared property. Project
+                # only that constraint; keep the portable contract and schema intact.
+                schema = {**schema, "required": list(schema["properties"])}
+            schema_path = output_path.with_name("codex-response.schema.json")
+            schema_path.write_bytes(canonical_json(schema))
+            command.extend(["--output-schema", str(schema_path)])
+        command.append(
+            codex_prompt(
+                prompt,
+                response_contract,
+                review_declaration_required=source_roots is not None,
+                prepared_contract=prepared_contract,
+            )
         )
+        if isolation:
+            # Codex's own seatbelt cannot be nested inside macOS sandbox-exec.
+            # The outer profile already denies the original proprietary checkout;
+            # use Codex's documented external-sandbox mode for the inner process.
+            command = ["sandbox-exec", "-f", str(isolation.profile), *command]
+
+        if evidence_dir is not None:
+            write_private_exclusive(
+                evidence_dir / "request.json",
+                canonical_json(
+                    {
+                        "command": [*command[:-1], "<inline-prompt>"],
+                        "model": model,
+                        "responseContract": response_contract,
+                        "promptSha256": sha256_bytes(command[-1].encode()),
+                    }
+                ),
+                label="Codex request evidence",
+                expected_parent_identity=evidence_parent_identity,
+            )
+
+        started = time.monotonic()
+        timed_out = False
+        process_environment = (
+            isolation.environment
+            if isolation
+            else codex_process_environment(
+                os.environ,
+                {"HOME": os.environ.get("HOME") or str(account_home())},
+            )
+        )
+
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=workspace,
+                env=process_environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as error:
+            diagnostic = f"Codex launch failed: {error}"
+            if evidence_dir is not None:
+                for name, contents in (("stdout.log", b""), ("stderr.log", diagnostic.encode())):
+                    write_private_exclusive(
+                        evidence_dir / name,
+                        contents,
+                        label=f"Codex {name} evidence",
+                        expected_parent_identity=evidence_parent_identity,
+                    )
+                write_private_exclusive(
+                    evidence_dir / "output-state.json",
+                    canonical_json({"exists": False}),
+                    label="Codex output state",
+                    expected_parent_identity=evidence_parent_identity,
+                )
+            return (
+                127,
+                diagnostic,
+                None,
+            )
         response_oversized = threading.Event()
         response_monitor_stop = threading.Event()
 
@@ -4312,6 +4382,20 @@ def invoke_codex(
         stderr, stderr_truncated = bounded_output(
             communicated_stderr, MAX_CODEX_STDERR_BYTES, stderr_capture_truncated
         )
+        if evidence_dir is not None:
+            for name, contents in (("stdout.log", stdout), ("stderr.log", stderr)):
+                write_private_exclusive(
+                    evidence_dir / name,
+                    contents,
+                    label=f"Codex {name} evidence",
+                    expected_parent_identity=evidence_parent_identity,
+                )
+            write_private_exclusive(
+                evidence_dir / "output-state.json",
+                canonical_json({"exists": output_path.is_file()}),
+                label="Codex output state",
+                expected_parent_identity=evidence_parent_identity,
+            )
         stderr_text = "review attempt timed out" if timed_out else stderr.decode(errors="replace")
         truncated_streams = [
             name
@@ -4324,7 +4408,6 @@ def invoke_codex(
         transport_output = f"{stdout.decode(errors='replace')}\n{stderr_text}"
         session = re.search(r"session id:\s*([^\s]+)", transport_output)
         resolved_model = re.search(r"^model:\s*([^\s]+)", transport_output, flags=re.MULTILINE)
-        response_text = ""
         if output_path.is_file() and not timed_out:
             with confined_regular_descriptor(output_path, os.O_RDONLY) as descriptor:
                 with os.fdopen(os.dup(descriptor), "rb") as stream:
@@ -4343,6 +4426,8 @@ def invoke_codex(
                     "Codex final response is not valid UTF-8",
                     PersistedResponse("", None, None, None, "", None, "openai-codex", ""),
                 )
+        else:
+            return exit_code, stderr_text, None
         return (
             exit_code,
             stderr_text,
@@ -4358,12 +4443,14 @@ def invoke_codex(
             ),
         )
     finally:
-        output_path.unlink(missing_ok=True)
-        if schema_path:
-            schema_path.unlink(missing_ok=True)
-        if isolation:
-            assert isolation_context is not None
-            isolation_context.__exit__(None, None, None)
+        try:
+            output_path.unlink(missing_ok=True)
+            if schema_path:
+                schema_path.unlink(missing_ok=True)
+        finally:
+            if isolation:
+                assert isolation_context is not None
+                isolation_context.__exit__(None, None, None)
 
 
 def load_response(database: Path | bytes) -> PersistedResponse | None:
@@ -4458,6 +4545,8 @@ def execute_llm_backend(request: BackendRequest) -> BackendExecution:
 
 def execute_codex_backend(request: BackendRequest) -> BackendExecution:
     response_path = request.attempt_dir / "response.md"
+    request_path = request.attempt_dir / "request.json"
+    stderr_path = request.attempt_dir / "stderr.log"
     with ExitStack() as workspace_context:
         workspace = (
             request.files[0].parent
@@ -4477,18 +4566,25 @@ def execute_codex_backend(request: BackendRequest) -> BackendExecution:
             timeout_seconds=request.timeout_seconds,
             workspace=workspace,
             prepared_contract=request.prepared_contract,
+            evidence_dir=request.attempt_dir,
+            evidence_parent_identity=request.evidence_parent_identity,
         )
-    write_private_exclusive(
-        response_path,
-        response.response.encode(),
-        label="Codex response evidence",
-        expected_parent_identity=request.evidence_parent_identity,
-    )
+    if response is not None:
+        write_private_exclusive(
+            response_path,
+            response.response.encode(),
+            label="Codex response evidence",
+            expected_parent_identity=request.evidence_parent_identity,
+        )
     return BackendExecution(
         exit_code,
         diagnostic,
         response,
-        BackendEvidence(response=response_path),
+        BackendEvidence(
+            request=request_path if request_path.is_file() else None,
+            response=response_path if response is not None else None,
+            stderr=stderr_path if stderr_path.is_file() else None,
+        ),
     )
 
 
@@ -5324,6 +5420,15 @@ def run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
         }
         if args.prompt_file:
             prompt_source["path"] = str(Path(args.prompt_file))
+        else:
+            prompt_path = turn_dir / "prompt.txt"
+            write_private_exclusive(
+                prompt_path,
+                prompt.encode(),
+                label="literal prompt source",
+                expected_parent_identity=turn_identity,
+            )
+            prompt_source["path"] = str(prompt_path)
         source_files.append(prompt_source)
     snapshot_hashes = {file.name: sha256_bytes(file.read_bytes()) for file in snapshots}
     native_contract = (
