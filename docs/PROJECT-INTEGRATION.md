@@ -10,6 +10,12 @@ help shape a question or exercise a local REPL, but `reviewctl` remains the
 owner of formal review execution, receipt verification, and the archived
 evidence packet. See [Pi and reviewctl](PI-INTEGRATION.md) for the handoff.
 
+The [agentic work direction proposal](AGENTIC-CONTROL-PLANE-DIRECTION.md)
+discusses a possible provider-neutral exact-head review policy in response to
+PR #19. It is **not adopted** and does not waive the required evidence below
+or any stricter project/organization merge gate. PR #19 remains open pending
+an explicit replacement decision.
+
 ## Ownership
 
 | Location | Owns | Does not own |

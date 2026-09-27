@@ -4,6 +4,15 @@
 **Repository:** local `reviewctl` checkout
 **Purpose:** point-in-time operational handoff and roadmap
 
+**2026-09-27 addendum:** this handoff's phase labels and evidence below are a
+historical snapshot, not proof of today's implementation or CI state. The
+[agentic work direction proposal](AGENTIC-CONTROL-PLANE-DIRECTION.md) contains
+a separate, unadopted staged roadmap and a reconciliation of PRs #12/#19 and
+issues #3/#4/#16. It recommends preserving the existing review kernel while
+testing a sibling coordination layer only after the core gates are stable and
+the product boundary is agreed. Do not treat that proposal as completion of
+any phase below or as authority to merge/change the current review gate.
+
 ## 2026-08-23 product iteration
 
 The local product loop is now implemented on `main` as a project-first API and

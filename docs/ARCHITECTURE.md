@@ -4,6 +4,13 @@
 attempt execution, and receipts. It does not own an organization's model roster,
 a project's canonical history, or a federation peer's trust policy.
 
+This describes the review architecture, not an adopted work-management product.
+The [agentic work direction proposal](AGENTIC-CONTROL-PLANE-DIRECTION.md)
+recommends testing an optional sibling work log with references to the current
+review journal; it does **not** generalize `ReviewReceipt` or migrate
+`ProjectReviewJournal`. Its staged roadmap and unresolved decisions are not
+part of the implemented contract.
+
 ## Ownership planes
 
 1. **Contract plane — reviewctl.** Typed inputs and outputs, schemas, output
