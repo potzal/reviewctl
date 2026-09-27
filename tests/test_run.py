@@ -6830,6 +6830,7 @@ def test_invoke_codex_handles_non_pipe_and_timeout_processes(
 
     assert (success[0], success[2].response) == (0, "VERDICT: approved.")
     assert timeout[0] == 124
+    assert timeout[2] is None
     assert terminated == [timeout_process]
 
 
@@ -7007,7 +7008,7 @@ def test_codex_transport_fails_closed_when_proprietary_isolation_cannot_start(
 
     assert exit_code == 127
     assert "auth file" in error
-    assert response.response == ""
+    assert response is None
 
 
 def test_review_source_roots_uses_git_root_or_file_parent(tmp_path: Path) -> None:
@@ -7170,6 +7171,9 @@ def test_codex_isolation_preflight_failure_preserves_diagnostic_evidence(tmp_pat
     assert attempt["result"] == "transport-failed"
     assert attempt["exitCode"] == 127
     assert attempt["validationError"] is None
+    assert attempt["rawResponse"] is None
+    assert attempt["evidence"]["response"] is None
+    assert not (turn / "attempts" / "01" / "response.md").exists()
     assert json.loads(Path(attempt["evidence"]["request"]).read_text())["command"] is None
     assert Path(attempt["evidence"]["stderr"]).is_file()
     assert json.loads((turn / "attempts" / "01" / "output-state.json").read_text()) == {
@@ -7215,6 +7219,9 @@ raise SystemExit(71)
     assert attempt["exitCode"] == 71
     assert attempt["validationError"] is None
     assert attempt["isolation"] == "macos-source-root-deny"
+    assert attempt["rawResponse"] is None
+    assert attempt["evidence"]["response"] is None
+    assert not (turn / "attempts" / "01" / "response.md").exists()
     request = json.loads(Path(attempt["evidence"]["request"]).read_text())
     assert request["command"][-1] == "<inline-prompt>"
     assert request["model"] == "gpt-5.6-terra"
@@ -7252,6 +7259,41 @@ def test_codex_request_evidence_collision_closes_isolated_auth_home(
     assert not context.home.exists()
 
 
+def test_codex_auth_copy_error_preserves_preflight_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    auth = tmp_path / "auth.json"
+    auth.write_text("private test token")
+    monkeypatch.setenv("CODEX_AUTH_FILE", str(auth))
+    monkeypatch.setattr(cli.shutil, "which", lambda _: "/usr/bin/sandbox-exec")
+
+    def reject_auth_copy(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError("auth copy forbidden")
+
+    monkeypatch.setattr(cli.shutil, "copyfile", reject_auth_copy)
+    attempt_dir = tmp_path / "attempt"
+    attempt_dir.mkdir()
+
+    exit_code, diagnostic, response = cli.invoke_codex(
+        codex_bin="codex",
+        prompt="Review this source.",
+        model="gpt-5.6-terra",
+        response_contract="findings-json",
+        source_roots=[tmp_path / "source-root"],
+        timeout_seconds=2,
+        workspace=tmp_path,
+        evidence_dir=attempt_dir,
+    )
+
+    assert exit_code == 127
+    assert "auth copy forbidden" in diagnostic
+    assert response is None
+    assert json.loads((attempt_dir / "request.json").read_text())["command"] is None
+    assert (attempt_dir / "stdout.log").read_bytes() == b""
+    assert b"auth copy forbidden" in (attempt_dir / "stderr.log").read_bytes()
+    assert json.loads((attempt_dir / "output-state.json").read_text()) == {"exists": False}
+
+
 @pytest.mark.parametrize("retain_evidence", [True, False])
 def test_codex_launch_error_returns_transport_evidence_and_closes_isolated_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retain_evidence: bool
@@ -7279,7 +7321,7 @@ def test_codex_launch_error_returns_transport_evidence_and_closes_isolated_home(
 
     assert exit_code == 127
     assert "sandbox-exec" in diagnostic
-    assert response.response == ""
+    assert response is None
     assert context.closed
     assert not context.home.exists()
     if retain_evidence:
@@ -7398,6 +7440,8 @@ def test_codex_transport_times_out_without_retaining_a_raw_response(tmp_path: Pa
     turn = Path(result.stdout.strip())
     receipt = json.loads((turn / "receipt.json").read_text())
     assert receipt["attempts"][0]["result"] == "timeout"
+    assert receipt["attempts"][0]["rawResponse"] is None
+    assert receipt["attempts"][0]["evidence"]["response"] is None
     assert not list(turn.glob("**/codex-response.md"))
 
 
@@ -7441,6 +7485,8 @@ def test_codex_timeout_discards_a_partial_response_written_before_termination(
     receipt = json.loads((Path(result.stdout.strip()) / "receipt.json").read_text())
     assert receipt["attempts"][0]["result"] == "timeout"
     assert receipt["attempts"][0]["findings"] == []
+    assert receipt["attempts"][0]["rawResponse"] is None
+    assert receipt["attempts"][0]["evidence"]["response"] is None
 
 
 def test_rejects_response_recorded_for_a_different_model(tmp_path: Path) -> None:

@@ -4116,7 +4116,7 @@ def invoke_codex(
     prepared_contract: PreparedContract | None = None,
     evidence_dir: Path | None = None,
     evidence_parent_identity: tuple[int, int] | None = None,
-) -> tuple[int, str, PersistedResponse]:
+) -> tuple[int, str, PersistedResponse | None]:
     """Run Codex against the isolated snapshots and recover its final response."""
     isolation: CodexIsolation | None = None
     try:
@@ -4125,7 +4125,7 @@ def invoke_codex(
             isolation = isolation_context.__enter__()
         else:
             isolation_context = None
-    except RuntimeError as error:
+    except (RuntimeError, OSError) as error:
         if evidence_dir is not None:
             write_private_exclusive(
                 evidence_dir / "request.json",
@@ -4156,7 +4156,7 @@ def invoke_codex(
         return (
             127,
             str(error),
-            PersistedResponse("", None, None, None, "", None, "openai-codex", ""),
+            None,
         )
 
     temporary_root = isolation.home if isolation else workspace
@@ -4261,7 +4261,7 @@ def invoke_codex(
             return (
                 127,
                 diagnostic,
-                PersistedResponse("", None, None, None, "", None, "openai-codex", ""),
+                None,
             )
         response_oversized = threading.Event()
         response_monitor_stop = threading.Event()
@@ -4408,7 +4408,6 @@ def invoke_codex(
         transport_output = f"{stdout.decode(errors='replace')}\n{stderr_text}"
         session = re.search(r"session id:\s*([^\s]+)", transport_output)
         resolved_model = re.search(r"^model:\s*([^\s]+)", transport_output, flags=re.MULTILINE)
-        response_text = ""
         if output_path.is_file() and not timed_out:
             with confined_regular_descriptor(output_path, os.O_RDONLY) as descriptor:
                 with os.fdopen(os.dup(descriptor), "rb") as stream:
@@ -4427,6 +4426,8 @@ def invoke_codex(
                     "Codex final response is not valid UTF-8",
                     PersistedResponse("", None, None, None, "", None, "openai-codex", ""),
                 )
+        else:
+            return exit_code, stderr_text, None
         return (
             exit_code,
             stderr_text,
@@ -4568,19 +4569,20 @@ def execute_codex_backend(request: BackendRequest) -> BackendExecution:
             evidence_dir=request.attempt_dir,
             evidence_parent_identity=request.evidence_parent_identity,
         )
-    write_private_exclusive(
-        response_path,
-        response.response.encode(),
-        label="Codex response evidence",
-        expected_parent_identity=request.evidence_parent_identity,
-    )
+    if response is not None:
+        write_private_exclusive(
+            response_path,
+            response.response.encode(),
+            label="Codex response evidence",
+            expected_parent_identity=request.evidence_parent_identity,
+        )
     return BackendExecution(
         exit_code,
         diagnostic,
         response,
         BackendEvidence(
             request=request_path if request_path.is_file() else None,
-            response=response_path,
+            response=response_path if response is not None else None,
             stderr=stderr_path if stderr_path.is_file() else None,
         ),
     )
