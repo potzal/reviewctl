@@ -378,6 +378,17 @@ Read these fields in order:
 5. `evidence` names the retained request, response, Pi event stream, session, or
    stderr files that exist for that attempt.
 
+For a Codex `transport-failed` attempt, inspect its private `evidence.request`
+and `evidence.stderr`, then `attempts/NN/stdout.log` and `output-state.json`
+before retrying. The request manifest redacts the inline prompt; the output
+state records only whether Codex produced a final-response file before
+cleanup. A macOS isolation or authentication preflight error is a transport
+failure, not `invalid-json` or evidence that the model reviewed the files.
+If `reviewctl verify` reports `receipt-source` for a literal-prompt receipt,
+the private turn-level `prompt.txt` or its bytes are missing/changed; restore
+the original source from a trusted backup or run a fresh review. Do not edit
+the old receipt or invent a source path.
+
 Exit status `1` means unavailable or invalid evidence, not approval. Exit status
 `2` means the command, config, policy, or local input was rejected before a
 review could run. Correct the named cause, create a new receipt, and run:
