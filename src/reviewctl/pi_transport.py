@@ -390,6 +390,7 @@ class PiTransport:
             diagnostic=diagnostic,
             response=persisted,
             evidence=BackendEvidence(
+                request=request.attempt_dir / "request.json",
                 response=response_path,
                 session=session_path if session_path.is_file() else None,
                 stderr=stderr_path,

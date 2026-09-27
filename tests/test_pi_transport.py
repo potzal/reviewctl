@@ -102,6 +102,8 @@ def test_pi_request_uses_exact_model_and_no_tools_by_default(tmp_path: Path) -> 
     assert runner.last_stdin == "private prompt"
     assert execution.response is not None
     assert execution.response.model == "openrouter/stealth/ox-alpha"
+    assert execution.evidence.request == tmp_path / "attempt" / "request.json"
+    assert json.loads(execution.evidence.request.read_text())["thinking"] == "minimal"
 
 
 def test_pi_request_uses_configured_thinking_level(tmp_path: Path) -> None:

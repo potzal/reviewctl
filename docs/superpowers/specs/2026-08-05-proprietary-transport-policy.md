@@ -1,5 +1,12 @@
 # Proprietary Transport Policy
 
+> Historical proposal, not current policy or receipt contract. Current
+> behavior is documented in [Evidence](../../EVIDENCE.md) and
+> [Project integration](../../PROJECT-INTEGRATION.md). In particular,
+> prompt-only receipts now include a path-and-hash prompt source entry rather than
+> the empty `source.files` list requested below. Do not use the old verification
+> item 6 as an acceptance gate for current code.
+
 ## Problem
 
 `reviewctl` records a policy decision per model through `source_allowed`, but
