@@ -640,12 +640,16 @@ def load_route_profile(
         settings[key] = value
     thinking = profile_config.get("thinking") if isinstance(profile_config, dict) else None
     if thinking is not None:
-        if not isinstance(thinking, str) or thinking not in PI_THINKING_LEVELS:
+        normalized_thinking = thinking.strip() if isinstance(thinking, str) else thinking
+        if (
+            not isinstance(normalized_thinking, str)
+            or normalized_thinking not in PI_THINKING_LEVELS
+        ):
             parser.error(
                 f"profile {profile!r}: thinking must be one of "
                 f"{', '.join(sorted(PI_THINKING_LEVELS))}"
             )
-        settings["thinking"] = thinking
+        settings["thinking"] = normalized_thinking
     reasoning_effort = (
         profile_config.get("reasoning_effort") if isinstance(profile_config, dict) else None
     )
@@ -4110,6 +4114,8 @@ def invoke_codex(
     timeout_seconds: int,
     workspace: Path,
     prepared_contract: PreparedContract | None = None,
+    evidence_dir: Path | None = None,
+    evidence_parent_identity: tuple[int, int] | None = None,
 ) -> tuple[int, str, PersistedResponse]:
     """Run Codex against the isolated snapshots and recover its final response."""
     isolation: CodexIsolation | None = None
@@ -4120,6 +4126,33 @@ def invoke_codex(
         else:
             isolation_context = None
     except RuntimeError as error:
+        if evidence_dir is not None:
+            write_private_exclusive(
+                evidence_dir / "request.json",
+                canonical_json(
+                    {"command": None, "model": model, "responseContract": response_contract}
+                ),
+                label="Codex request evidence",
+                expected_parent_identity=evidence_parent_identity,
+            )
+            write_private_exclusive(
+                evidence_dir / "stdout.log",
+                b"",
+                label="Codex stdout evidence",
+                expected_parent_identity=evidence_parent_identity,
+            )
+            write_private_exclusive(
+                evidence_dir / "stderr.log",
+                str(error).encode(),
+                label="Codex stderr evidence",
+                expected_parent_identity=evidence_parent_identity,
+            )
+            write_private_exclusive(
+                evidence_dir / "output-state.json",
+                canonical_json({"exists": False}),
+                label="Codex output state",
+                expected_parent_identity=evidence_parent_identity,
+            )
         return (
             127,
             str(error),
@@ -4172,6 +4205,21 @@ def invoke_codex(
         # The outer profile already denies the original proprietary checkout;
         # use Codex's documented external-sandbox mode for the inner process.
         command = ["sandbox-exec", "-f", str(isolation.profile), *command]
+
+    if evidence_dir is not None:
+        write_private_exclusive(
+            evidence_dir / "request.json",
+            canonical_json(
+                {
+                    "command": [*command[:-1], "<inline-prompt>"],
+                    "model": model,
+                    "responseContract": response_contract,
+                    "promptSha256": sha256_bytes(command[-1].encode()),
+                }
+            ),
+            label="Codex request evidence",
+            expected_parent_identity=evidence_parent_identity,
+        )
 
     started = time.monotonic()
     timed_out = False
@@ -4312,6 +4360,20 @@ def invoke_codex(
         stderr, stderr_truncated = bounded_output(
             communicated_stderr, MAX_CODEX_STDERR_BYTES, stderr_capture_truncated
         )
+        if evidence_dir is not None:
+            for name, contents in (("stdout.log", stdout), ("stderr.log", stderr)):
+                write_private_exclusive(
+                    evidence_dir / name,
+                    contents,
+                    label=f"Codex {name} evidence",
+                    expected_parent_identity=evidence_parent_identity,
+                )
+            write_private_exclusive(
+                evidence_dir / "output-state.json",
+                canonical_json({"exists": output_path.is_file()}),
+                label="Codex output state",
+                expected_parent_identity=evidence_parent_identity,
+            )
         stderr_text = "review attempt timed out" if timed_out else stderr.decode(errors="replace")
         truncated_streams = [
             name
@@ -4458,6 +4520,8 @@ def execute_llm_backend(request: BackendRequest) -> BackendExecution:
 
 def execute_codex_backend(request: BackendRequest) -> BackendExecution:
     response_path = request.attempt_dir / "response.md"
+    request_path = request.attempt_dir / "request.json"
+    stderr_path = request.attempt_dir / "stderr.log"
     with ExitStack() as workspace_context:
         workspace = (
             request.files[0].parent
@@ -4477,6 +4541,8 @@ def execute_codex_backend(request: BackendRequest) -> BackendExecution:
             timeout_seconds=request.timeout_seconds,
             workspace=workspace,
             prepared_contract=request.prepared_contract,
+            evidence_dir=request.attempt_dir,
+            evidence_parent_identity=request.evidence_parent_identity,
         )
     write_private_exclusive(
         response_path,
@@ -4488,7 +4554,11 @@ def execute_codex_backend(request: BackendRequest) -> BackendExecution:
         exit_code,
         diagnostic,
         response,
-        BackendEvidence(response=response_path),
+        BackendEvidence(
+            request=request_path if request_path.is_file() else None,
+            response=response_path,
+            stderr=stderr_path if stderr_path.is_file() else None,
+        ),
     )
 
 
@@ -5324,6 +5394,15 @@ def run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
         }
         if args.prompt_file:
             prompt_source["path"] = str(Path(args.prompt_file))
+        else:
+            prompt_path = turn_dir / "prompt.txt"
+            write_private_exclusive(
+                prompt_path,
+                prompt.encode(),
+                label="literal prompt source",
+                expected_parent_identity=turn_identity,
+            )
+            prompt_source["path"] = str(prompt_path)
         source_files.append(prompt_source)
     snapshot_hashes = {file.name: sha256_bytes(file.read_bytes()) for file in snapshots}
     native_contract = (

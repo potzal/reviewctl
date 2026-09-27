@@ -3897,6 +3897,16 @@ def test_route_profile_loads_openrouter_reasoning_effort(tmp_path: Path) -> None
     assert metadata["settings"]["reasoning_effort"] == "medium"
 
 
+def test_route_profile_normalizes_thinking_like_project_config(tmp_path: Path) -> None:
+    config = tmp_path / "reviewctl.toml"
+    config.write_text('[profiles.code]\nroutes = ["llm:accepted"]\nthinking = " max "\n')
+
+    routes, metadata = cli.load_route_profile(cli.build_parser(), str(config), "code")
+
+    assert routes == (cli.ReviewRoute("llm", "accepted"),)
+    assert metadata["settings"]["thinking"] == "max"
+
+
 def test_run_reasoning_effort_overrides_openrouter_profile(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -7101,7 +7111,99 @@ def test_codex_transport_applies_source_root_isolation_for_proprietary_reviews(
 
     assert result.returncode == 0, result.stderr
     receipt = json.loads((Path(result.stdout.strip()) / "receipt.json").read_text())
-    assert receipt["attempts"][0]["isolation"] == "macos-source-root-deny"
+    attempt = receipt["attempts"][0]
+    assert attempt["isolation"] == "macos-source-root-deny"
+    attempt_dir = Path(result.stdout.strip()) / "attempts" / "01"
+    assert json.loads((attempt_dir / "output-state.json").read_text()) == {"exists": True}
+    assert Path(attempt["evidence"]["request"]).is_file()
+    assert Path(attempt["evidence"]["stderr"]).is_file()
+    assert attempt["rawResponse"] is not None
+
+
+def test_codex_isolation_preflight_failure_preserves_diagnostic_evidence(tmp_path: Path) -> None:
+    fake_codex = write_fake_codex(tmp_path)
+    write_fake_sandbox_exec(tmp_path)
+    policy = tmp_path / "policy.toml"
+    policy.write_text('[models."gpt-5.6-terra"]\nsource_allowed = true\n')
+
+    result = run_cli(
+        *review_arguments(tmp_path, "gpt-5.6-terra"),
+        "--transport",
+        "codex",
+        "--source-class",
+        "proprietary",
+        "--policy",
+        str(policy),
+        env={
+            "CODEX_AUTH_FILE": str(tmp_path / "missing-auth.json"),
+            "CODEX_BIN": str(fake_codex),
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+        },
+    )
+
+    assert result.returncode == 1
+    turn = Path(result.stdout.strip())
+    receipt_path = turn / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    attempt = receipt["attempts"][0]
+    assert attempt["result"] == "transport-failed"
+    assert attempt["exitCode"] == 127
+    assert attempt["validationError"] is None
+    assert json.loads(Path(attempt["evidence"]["request"]).read_text())["command"] is None
+    assert Path(attempt["evidence"]["stderr"]).is_file()
+    assert json.loads((turn / "attempts" / "01" / "output-state.json").read_text()) == {
+        "exists": False
+    }
+    assert cli.verify_receipt(SimpleNamespace(receipt=str(receipt_path))) == 0
+
+
+def test_codex_isolation_failure_preserves_process_evidence_before_cleanup(tmp_path: Path) -> None:
+    fake_codex = write_fake_python_executable(
+        tmp_path,
+        "codex",
+        """import sys
+
+print('sandbox setup failed', file=sys.stderr)
+print('codex startup', file=sys.stdout)
+raise SystemExit(71)
+""",
+    )
+    environment = fake_isolated_codex_environment(tmp_path, fake_codex)
+    policy = tmp_path / "policy.toml"
+    policy.write_text('[models."gpt-5.6-terra"]\nsource_allowed = true\n')
+
+    result = run_cli(
+        *review_arguments(tmp_path, "gpt-5.6-terra"),
+        "--transport",
+        "codex",
+        "--source-class",
+        "proprietary",
+        "--policy",
+        str(policy),
+        "--response-contract",
+        "findings-json",
+        env=environment,
+    )
+
+    assert result.returncode == 1
+    turn = Path(result.stdout.strip())
+    receipt_path = turn / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    attempt = receipt["attempts"][0]
+    assert attempt["result"] == "transport-failed"
+    assert attempt["exitCode"] == 71
+    assert attempt["validationError"] is None
+    assert attempt["isolation"] == "macos-source-root-deny"
+    request = json.loads(Path(attempt["evidence"]["request"]).read_text())
+    assert request["command"][-1] == "<inline-prompt>"
+    assert request["model"] == "gpt-5.6-terra"
+    assert request["responseContract"] == "findings-json"
+    assert json.loads((turn / "attempts" / "01" / "output-state.json").read_text()) == {
+        "exists": False
+    }
+    assert (turn / "attempts" / "01" / "stdout.log").read_bytes() == b"codex startup\n"
+    assert Path(attempt["evidence"]["stderr"]).read_bytes() == b"sandbox setup failed\n"
+    assert cli.verify_receipt(SimpleNamespace(receipt=str(receipt_path))) == 0
 
 
 def test_codex_transport_times_out_without_retaining_a_raw_response(tmp_path: Path) -> None:
@@ -14346,7 +14448,15 @@ def test_cli_task8_prompt_only_review_records_synthetic_prompt_source(
         ]
     )
     assert namespace.handler(namespace) == 0
-    receipt = json.loads((Path(capsys.readouterr().out.strip()) / "receipt.json").read_text())
+    turn = Path(capsys.readouterr().out.strip())
+    receipt_path = turn / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
     assert receipt["source"]["files"] == [
-        {"name": "prompt.txt", "sha256": cli.sha256_bytes(b"Review this prompt-only request.")}
+        {
+            "name": "prompt.txt",
+            "path": str(turn / "prompt.txt"),
+            "sha256": cli.sha256_bytes(b"Review this prompt-only request."),
+        }
     ]
+    assert (turn / "prompt.txt").read_text() == "Review this prompt-only request."
+    assert cli.verify_receipt(SimpleNamespace(receipt=str(receipt_path))) == 0

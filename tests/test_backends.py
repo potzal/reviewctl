@@ -612,6 +612,8 @@ def test_execute_codex_backend_persists_rejected_response_and_maps_evidence(
         "timeout_seconds": request.timeout_seconds,
         "workspace": request.files[0].parent,
         "prepared_contract": request.prepared_contract,
+        "evidence_dir": request.attempt_dir,
+        "evidence_parent_identity": request.evidence_parent_identity,
     }
     assert response_path.read_text() == "rejected"
     assert execution == BackendExecution(
