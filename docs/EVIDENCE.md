@@ -65,16 +65,21 @@ contain raw prompt and response data. The Codex transport similarly deletes its 
 file and any temporary JSON schema after extraction; the receipt keeps the Codex session identifier,
 response hash, and validated structured findings.
 For a literal `run --prompt` with no input files, the turn instead retains a private `prompt.txt`
-as its synthetic source. Its receipt records that path and hash so offline `reviewctl verify` can
-check the exact accepted prompt. Treat the turn directory as sensitive.
+as its synthetic source. Its receipt records that path and hash. Offline `reviewctl verify` validates
+the receipt's structure and digest, **not** the current bytes or existence of `prompt.txt`. Compare
+the retained file with the recorded SHA-256 separately if source integrity is required. Treat the
+turn directory as sensitive.
 
 Each Codex attempt retains a private `request.json` (command arguments with the inline prompt
-redacted, requested model/contract and prompt hash), bounded `stdout.log` and `stderr.log`, and
+redacted and requested model/contract; launched attempts also record a prompt hash), bounded
+`stdout.log` and `stderr.log`, and
 `output-state.json` recording whether the final-response file existed before cleanup. These
 diagnostics survive an isolation/preflight or process failure; the transient response/schema and
 isolated home are still removed. The presence of logs or an output file is not a valid review or
 source-read proof. The receipt points to the request and stderr evidence where available, and
-the other files are in the same `attempts/NN` directory.
+the other files are in the same `attempts/NN` directory. A preflight failure
+has `command: null` and no prompt hash because no Codex command was assembled
+or sent.
 
 For proprietary Codex reviews on macOS, the runner also creates a temporary `CODEX_HOME` with only the
 authentication file required by Codex and applies `sandbox-exec` rules that deny reads and writes to

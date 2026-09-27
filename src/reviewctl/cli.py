@@ -4180,67 +4180,89 @@ def invoke_codex(
         "--output-last-message",
         str(output_path),
     ]
-    if schema := response_schema(
-        response_contract,
-        codex=source_roots is not None,
-        prepared_contract=prepared_contract,
-    ):
-        if prepared_contract is not None:
-            # Codex Structured Outputs requires every declared property. Project
-            # only that constraint; keep the portable contract and schema intact.
-            schema = {**schema, "required": list(schema["properties"])}
-        schema_path = output_path.with_name("codex-response.schema.json")
-        schema_path.write_bytes(canonical_json(schema))
-        command.extend(["--output-schema", str(schema_path)])
-    command.append(
-        codex_prompt(
-            prompt,
-            response_contract,
-            review_declaration_required=source_roots is not None,
-            prepared_contract=prepared_contract,
-        )
-    )
-    if isolation:
-        # Codex's own seatbelt cannot be nested inside macOS sandbox-exec.
-        # The outer profile already denies the original proprietary checkout;
-        # use Codex's documented external-sandbox mode for the inner process.
-        command = ["sandbox-exec", "-f", str(isolation.profile), *command]
-
-    if evidence_dir is not None:
-        write_private_exclusive(
-            evidence_dir / "request.json",
-            canonical_json(
-                {
-                    "command": [*command[:-1], "<inline-prompt>"],
-                    "model": model,
-                    "responseContract": response_contract,
-                    "promptSha256": sha256_bytes(command[-1].encode()),
-                }
-            ),
-            label="Codex request evidence",
-            expected_parent_identity=evidence_parent_identity,
-        )
-
-    started = time.monotonic()
-    timed_out = False
-    process_environment = (
-        isolation.environment
-        if isolation
-        else codex_process_environment(
-            os.environ,
-            {"HOME": os.environ.get("HOME") or str(account_home())},
-        )
-    )
-
     try:
-        process = subprocess.Popen(
-            command,
-            cwd=workspace,
-            env=process_environment,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
+        if schema := response_schema(
+            response_contract,
+            codex=source_roots is not None,
+            prepared_contract=prepared_contract,
+        ):
+            if prepared_contract is not None:
+                # Codex Structured Outputs requires every declared property. Project
+                # only that constraint; keep the portable contract and schema intact.
+                schema = {**schema, "required": list(schema["properties"])}
+            schema_path = output_path.with_name("codex-response.schema.json")
+            schema_path.write_bytes(canonical_json(schema))
+            command.extend(["--output-schema", str(schema_path)])
+        command.append(
+            codex_prompt(
+                prompt,
+                response_contract,
+                review_declaration_required=source_roots is not None,
+                prepared_contract=prepared_contract,
+            )
         )
+        if isolation:
+            # Codex's own seatbelt cannot be nested inside macOS sandbox-exec.
+            # The outer profile already denies the original proprietary checkout;
+            # use Codex's documented external-sandbox mode for the inner process.
+            command = ["sandbox-exec", "-f", str(isolation.profile), *command]
+
+        if evidence_dir is not None:
+            write_private_exclusive(
+                evidence_dir / "request.json",
+                canonical_json(
+                    {
+                        "command": [*command[:-1], "<inline-prompt>"],
+                        "model": model,
+                        "responseContract": response_contract,
+                        "promptSha256": sha256_bytes(command[-1].encode()),
+                    }
+                ),
+                label="Codex request evidence",
+                expected_parent_identity=evidence_parent_identity,
+            )
+
+        started = time.monotonic()
+        timed_out = False
+        process_environment = (
+            isolation.environment
+            if isolation
+            else codex_process_environment(
+                os.environ,
+                {"HOME": os.environ.get("HOME") or str(account_home())},
+            )
+        )
+
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=workspace,
+                env=process_environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as error:
+            diagnostic = f"Codex launch failed: {error}"
+            if evidence_dir is not None:
+                for name, contents in (("stdout.log", b""), ("stderr.log", diagnostic.encode())):
+                    write_private_exclusive(
+                        evidence_dir / name,
+                        contents,
+                        label=f"Codex {name} evidence",
+                        expected_parent_identity=evidence_parent_identity,
+                    )
+                write_private_exclusive(
+                    evidence_dir / "output-state.json",
+                    canonical_json({"exists": False}),
+                    label="Codex output state",
+                    expected_parent_identity=evidence_parent_identity,
+                )
+            return (
+                127,
+                diagnostic,
+                PersistedResponse("", None, None, None, "", None, "openai-codex", ""),
+            )
         response_oversized = threading.Event()
         response_monitor_stop = threading.Event()
 
@@ -4420,12 +4442,14 @@ def invoke_codex(
             ),
         )
     finally:
-        output_path.unlink(missing_ok=True)
-        if schema_path:
-            schema_path.unlink(missing_ok=True)
-        if isolation:
-            assert isolation_context is not None
-            isolation_context.__exit__(None, None, None)
+        try:
+            output_path.unlink(missing_ok=True)
+            if schema_path:
+                schema_path.unlink(missing_ok=True)
+        finally:
+            if isolation:
+                assert isolation_context is not None
+                isolation_context.__exit__(None, None, None)
 
 
 def load_response(database: Path | bytes) -> PersistedResponse | None:

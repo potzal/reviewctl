@@ -275,8 +275,9 @@ reviewctl run \
 ```
 
 Synthetic prompt-only rounds intentionally omit `--file`. The receipt still
-records the prompt as a source entry with a path and SHA-256 hash, so offline
-`reviewctl verify` can check the exact prompt bytes. With `--prompt-file`, the
+records the prompt as a source entry with a path and SHA-256 hash. Offline
+`reviewctl verify` checks the receipt's digest and structure; it does **not**
+re-read the prompt file to compare its current bytes. With `--prompt-file`, the
 source path is the supplied file; with a literal `--prompt`, a private
 `prompt.txt` is retained in the turn directory. Neither is a reviewed code
 file, and neither supplies Codex source-read proof.

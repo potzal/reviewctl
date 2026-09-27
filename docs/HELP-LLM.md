@@ -384,10 +384,12 @@ before retrying. The request manifest redacts the inline prompt; the output
 state records only whether Codex produced a final-response file before
 cleanup. A macOS isolation or authentication preflight error is a transport
 failure, not `invalid-json` or evidence that the model reviewed the files.
-If `reviewctl verify` reports `receipt-source` for a literal-prompt receipt,
-the private turn-level `prompt.txt` or its bytes are missing/changed; restore
-the original source from a trusted backup or run a fresh review. Do not edit
-the old receipt or invent a source path.
+If `reviewctl verify` reports `receipt-source`, the receipt's source metadata
+is missing or malformed; it does not mean the source file was re-read. For a
+literal prompt, compare the private turn-level `prompt.txt` against the
+receipt's recorded SHA-256 separately. If the source is missing or changed,
+restore it from a trusted backup or run a fresh review. Do not edit the old
+receipt or invent a source path.
 
 Exit status `1` means unavailable or invalid evidence, not approval. Exit status
 `2` means the command, config, policy, or local input was rejected before a
