@@ -35,5 +35,14 @@ Files: `docs/POTZAL-INTEGRATION.md`, `docs/ARCHITECTURE.md`, `docs/HANDOFF.md`, 
 - [x] Document exact configuration, commands, verifier guarantees, service-scoped permissions, retry outcomes and future federation boundary.
 - [x] Run a real local Potzal daemon with synthetic credentials and two temporary projects; verify same receipt bytes, retry and denied-token behavior. Record source SHAs and results without credentials.
 - [x] Run CI selector unchanged: `uv run pytest -m 'unit or contract' --cov=reviewctl --cov-branch --cov-report=term-missing`; preserve 100% threshold. Run Ruff check/format and `uv build`.
-- [ ] Request independent spec review, then quality review; fix reproduced findings and rerun affected checks.
-- [ ] Commit the finite integration and prepare a reviewable PR. Live Amelia use and server project isolation are separate pending gates.
+- [x] Request independent spec review, then quality review; fix reproduced findings and rerun affected checks.
+- [x] Commit the finite integration and prepare a reviewable PR: [#31](https://github.com/potzal/reviewctl/pull/31). Live Amelia use and server project isolation are separate pending gates.
+
+## Review-driven closure
+
+- [x] Reproduce and fix project/state replacement before download persistence.
+- [x] Reproduce and fix output/file replacement after opening but before reporting success.
+- [x] Cancel slow active HTTP/TLS I/O under one monotonic budget, including conflict GET; document the synchronous DNS exception.
+- [x] Make deep JSON regressions independent of native decoder stack assumptions, remove the machine-specific public-doc path, and verify the focused suite on macOS/Linux.
+- [x] Repeat the full deterministic selector at the 100% line/branch gate, lint, formatting, package build and real local daemon canary.
+- [ ] Confirm remote CI at the final PR head; integration into main is not implied by this plan's local verification.

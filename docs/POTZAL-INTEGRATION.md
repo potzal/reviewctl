@@ -28,6 +28,15 @@ an HTTPS origin without URL credentials, path, query or fragment. Literal
 `http://127.0.0.1:<port>` and IPv6 loopback are accepted for a local canary.
 Redirects are rejected, including redirects on authenticated reads.
 
+`timeout_seconds` supplies one monotonic budget shared by the upload/read and
+any conflict-reconciliation GET. Active socket I/O is cancelled at expiry,
+including slow headers or bodies; the client does not leave an authenticated
+upload running in a background worker. The operating-system DNS resolver is
+synchronous and cannot be cancelled portably: it can delay the command's return
+beyond the configured budget. Its result is checked before opening a socket,
+so an expired resolution cannot start a late upload. This is not a hard wall-time
+guarantee for DNS resolution or local CPU/filesystem work.
+
 At the reviewed Potzal baseline (`ab05839`), `/v1/objects` authorizes access to
 the **service**, not the project. A namespace does not create a project access
 boundary. Use one owner's trusted authorization domain or a dedicated evidence
@@ -102,6 +111,13 @@ Downloaded receipts live below `.reviewctl/shared/<digest>/receipt.json` with
 private permissions. A repeated pull reuses identical bytes; differing existing
 bytes are preserved and reported as a conflict. No imported finding/lifecycle
 events are applied to the local journal.
+Download persistence is tied to the original project and state-directory
+identities and uses descriptor-relative writes. Replacing either directory
+during retrieval fails before writing into the replacement; symlinked output
+components and receipt targets are rejected.
+The advertised output directory and receipt identities are checked again after
+persistence, so a replacement cannot be reported as the verified downloaded
+path. A failure preserves the pinned original artifact for diagnosis.
 
 ## Local proof and later increments
 

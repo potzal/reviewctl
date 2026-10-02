@@ -57,6 +57,11 @@ the configured namespace; release name is `0.0.0+receipt.<artifact-sha256>`.
 Credentials are read from the named environment variable, never written to
 config, artifacts, journal or diagnostics. HTTPS is required except literal
 loopback HTTP for local testing. Redirects are rejected.
+One monotonic network budget spans active socket I/O and the conflict GET.
+Synchronous operating-system DNS resolution can delay return beyond the budget;
+expiration is checked before sockets open, and no late background upload is
+started. This limitation must remain visible rather than claiming a hard
+end-to-end wall-time guarantee.
 
 Repeated publication accepts a 409 only after fetching the requested CAS object
 and comparing its exact bytes. This proves the artifact remains retrievable;
@@ -66,6 +71,8 @@ leave the remote artifact stored; repeating the command reconciles it.
 Retrieval checks bounded response size, requested object digest, artifact schema,
 project ID, embedded receipt byte digest and canonical receipt verification
 before writing a private file. Existing local bytes are reused only if identical.
+Writes remain descriptor-confined to the original project/state identities;
+replacing either pathname during network access cannot redirect persistence.
 Journal observations record storage facts, never review acceptance or approval.
 An existing journal is only appended to; no imported journal events are replayed.
 
