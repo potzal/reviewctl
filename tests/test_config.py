@@ -12,6 +12,87 @@ from reviewctl.config import ConfigError, load_config, parse_route
 from reviewctl.filesystem import confined_relative_regular_descriptor, read_confined_bytes
 
 
+def test_potzal_storage_is_opt_in_and_requires_stable_project_id(tmp_path: Path) -> None:
+    path = tmp_path / "reviewctl.toml"
+    path.write_text('[project]\nid = "portable-project"\n')
+    assert load_config(path, user_path=None).potzal is None
+    path.write_text(
+        '[project]\nid = "portable-project"\n'
+        '[evidence.potzal]\nendpoint = "https://evidence.example"\n'
+        'namespace = "reviews/private"\ntoken_env = "RECEIPT_STORE_TOKEN"\n'
+    )
+    settings = load_config(path, user_path=None).potzal
+    assert settings.endpoint == "https://evidence.example"
+    assert settings.namespace == "reviews/private"
+    assert settings.token_env == "RECEIPT_STORE_TOKEN"
+    assert settings.timeout_seconds == 30
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        'endpoint = "http://remote.example"',
+        'endpoint = "https://user:password@example.com"',
+        'endpoint = "https://example.com/path"',
+        'endpoint = "https://example.com?query"',
+        'endpoint = "https://example.com#fragment"',
+        'endpoint = "https://"',
+        'endpoint = "https://example.com:bad"',
+        'endpoint = "https://example.com\\n"',
+        'endpoint = "https://example.com"\nnamespace = "../private"',
+        'endpoint = "https://example.com"\nnamespace = "Reviews"',
+        'endpoint = "https://example.com"\ntoken_env = "invalid-name"',
+        'endpoint = "https://example.com"\ntimeout_seconds = 0',
+        'endpoint = "https://example.com"\ntimeout_seconds = 301',
+        'endpoint = "https://example.com"\nunknown = true',
+    ],
+)
+def test_potzal_config_rejects_unsafe_settings(tmp_path: Path, settings: str) -> None:
+    path = tmp_path / "reviewctl.toml"
+    defaults = ('namespace = "reviews"\n' if "namespace =" not in settings else "") + (
+        'token_env = "TOKEN"\n' if "token_env =" not in settings else ""
+    )
+    path.write_text('[project]\nid = "project"\n[evidence.potzal]\n' + defaults + settings + "\n")
+    with pytest.raises(ConfigError):
+        load_config(path, user_path=None)
+
+
+@pytest.mark.parametrize("endpoint", ["http://127.0.0.1:8123", "http://[::1]:8123"])
+def test_potzal_config_accepts_literal_loopback_for_local_canary(
+    tmp_path: Path, endpoint: str
+) -> None:
+    path = tmp_path / "reviewctl.toml"
+    path.write_text(
+        '[project]\nid = "project"\n[evidence.potzal]\n'
+        f'endpoint = "{endpoint}"\nnamespace = "reviews"\ntoken_env = "TOKEN"\n'
+        "timeout_seconds = 10\n"
+    )
+    assert load_config(path, user_path=None).potzal.timeout_seconds == 10
+
+
+@pytest.mark.parametrize("suffix", ['evidence = "invalid"', '[evidence]\npotzal = "invalid"'])
+def test_potzal_config_requires_tables(tmp_path: Path, suffix: str) -> None:
+    path = tmp_path / "reviewctl.toml"
+    path.write_text(suffix + '\n[project]\nid = "project"\n')
+    with pytest.raises(ConfigError, match="evidence"):
+        load_config(path, user_path=None)
+
+
+def test_potzal_config_requires_portable_id_and_explicit_store_fields(tmp_path: Path) -> None:
+    path = tmp_path / "reviewctl.toml"
+    path.write_text('[evidence.potzal]\nendpoint = "https://example.com"\n')
+    with pytest.raises(ConfigError, match="project.id"):
+        load_config(path, user_path=None)
+    path.write_text('[project]\nid = "project"\n[evidence.potzal]\n')
+    with pytest.raises(ConfigError):
+        load_config(path, user_path=None)
+
+
+def test_potzal_api_rejects_unbounded_timeout() -> None:
+    with pytest.raises(ConfigError, match="timeout_seconds"):
+        config_module.PotzalSettings("https://example.com", "reviews", "TOKEN", None)
+
+
 def test_project_config_wins_over_user_profile(tmp_path: Path) -> None:
     user = tmp_path / "user.toml"
     project = tmp_path / "reviewctl.toml"

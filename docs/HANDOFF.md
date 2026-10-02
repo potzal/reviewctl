@@ -17,6 +17,15 @@ merge or change the current review gate.
 
 ## 2026-08-23 product iteration
 
+**2026-10-02 development addendum:** the bounded
+[Potzal integration](POTZAL-INTEGRATION.md) adds opt-in storage/retrieval of
+canonical receipts and local journal observations on the feature branch.
+Potzal's native object API is reused unchanged. It currently gives service-wide
+credential authority, not project isolation, and raw reads do not enforce
+release revocation. Signed exchange and journal federation below remain future
+work. Integration into main, exact-commit review and live Amelia use require
+their own evidence; local development does not establish those states.
+
 The local product loop is now implemented on `main` as a project-first API and
 CLI layer, without a BAML dependency and without a Potzal dependency:
 
@@ -182,10 +191,11 @@ Keep these ownership rules stable:
 The canonical journal is append-only and readable for replay and verification;
 it is not a write-only database. Projections may be rebuilt or discarded.
 
-Cljedger and Potzal are optional future integrations. `reviewctl` must remain
-usable locally without either dependency. A future integration should anchor a
-`ReviewReceipt` in a journal event without making Cljedger's commitment model
-the authority for review acceptance.
+Cljedger and signed Potzal exchange remain future integrations. The optional
+receipt byte adapter adds local storage observations and remains removable;
+`reviewctl` stays usable locally without either dependency. A future Cljedger
+integration should anchor a `ReviewReceipt` without making Cljedger's commitment
+model the authority for review acceptance.
 
 ## Roadmap
 

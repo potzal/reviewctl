@@ -53,6 +53,10 @@ ERROR_EXIT_CODES = {
     "github_publication_timeout": 3,
     "github_publication_response_invalid": 3,
     "publication_reconciliation_incomplete": 3,
+    "evidence_store_denied": 4,
+    "evidence_store_unavailable": 3,
+    "evidence_store_missing": 3,
+    "evidence_store_failed": 3,
 }
 
 

@@ -774,6 +774,14 @@ def llm_help_payload() -> dict[str, object]:
                 ),
             },
             "help-llm": "reviewctl help-llm --format json",
+            "receipts": {
+                "push": "reviewctl receipts push RECEIPT --project PATH --format json",
+                "pull": "reviewctl receipts pull sha256:DIGEST --project PATH --format json",
+                "config": "[evidence.potzal] with endpoint, namespace and token_env",
+                "authority": "current native-object credentials are service-scoped",
+                "approval": "storage preserves a receipt; it never grants review acceptance",
+                "errors": "inspect diagnostic.code, retryable and next; preserve local evidence",
+            },
         },
         "backendSemantics": {
             "availabilityIsNotQualification": True,
@@ -929,6 +937,15 @@ def help_llm(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         "A formal result requires receipt.result=accepted, a non-null acceptedAttempt, "
         "successful receipt verification, and independent checking of material findings. "
         "Hash verification alone proves integrity, not acceptance.\n\n"
+        "## Optional receipt storage\n\n"
+        "```bash\n"
+        "reviewctl receipts push RECEIPT.json --project PATH --format json\n"
+        "reviewctl receipts pull sha256:DIGEST --project PATH --format json\n"
+        "```\n\n"
+        "Configure an explicit project.id and [evidence.potzal] destination first. "
+        "Credentials come from token_env and currently authorize the service, not a project. "
+        "Storage preserves receipt bytes and never grants review acceptance. On failure "
+        "inspect diagnostic.code, retryable and next; preserve local evidence.\n\n"
         "## Provider-backed transport canary\n\n"
         "```bash\n"
         "reviewctl transport-canary --profile NAME\n"
@@ -6254,19 +6271,19 @@ def project_checkpoint_shape(value: object) -> bool:
     return PROJECT_CHECKPOINT_FIELDS.issubset(value)
 
 
-def verify_receipt(args: argparse.Namespace) -> int:
-    receipt_path = Path(args.receipt)
+def receipt_bytes_violations(contents: bytes) -> tuple[str, ...]:
+    """Apply the canonical offline verifier to unchanged receipt bytes."""
 
     def reject_nonstandard_constant(value: str) -> None:
         raise ValueError(f"non-standard JSON constant: {value}")
 
     try:
         receipt = json.loads(
-            read_confined_text(receipt_path),
+            contents.decode("utf-8"),
             object_pairs_hook=exact_json_object,
             parse_constant=reject_nonstandard_constant,
         )
-    except OSError, UnicodeError, ValueError:
+    except UnicodeError, ValueError:
         violations = ("json-receipt",)
     else:
         if project_checkpoint_shape(receipt):
@@ -6286,6 +6303,15 @@ def verify_receipt(args: argparse.Namespace) -> int:
             violations = validate_v2_receipt(receipt)
         else:
             violations = ("receipt-schema-version",)
+    return violations
+
+
+def verify_receipt(args: argparse.Namespace) -> int:
+    receipt_path = Path(args.receipt)
+    try:
+        violations = receipt_bytes_violations(read_confined_bytes(receipt_path))
+    except OSError:
+        violations = ("json-receipt",)
     valid = not violations
     print(
         json.dumps(
@@ -7195,6 +7221,9 @@ def build_parser() -> argparse.ArgumentParser:
         handler=lambda namespace: write_product_council_plan(parser, namespace)
     )
     add_project_commands(commands)
+    from reviewctl.receipt_store_cli import add_receipt_store_commands
+
+    add_receipt_store_commands(commands)
     return parser
 
 

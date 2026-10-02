@@ -6,6 +6,14 @@ This document proposes a possible next product boundary for `reviewctl`. It is
 not an implementation commitment and does not change current receipt, review,
 or merge-gate semantics.
 
+**2026-10-02 candidate addendum:** the independent
+[receipt storage increment](POTZAL-INTEGRATION.md) implements opt-in native
+object storage/retrieval on its feature branch. It does not adopt the sibling
+work layer proposed here. Its service-scoped authorization, unsigned project
+association and raw-CAS revocation limits are explicit; signed federation and
+multi-user coordination remain deferred. Implementation and main integration
+must be distinguished from this document's historical proposal snapshot.
+
 ## Executive direction
 
 Keep the existing review/evidence kernel narrow. Evaluate an **optional sibling
