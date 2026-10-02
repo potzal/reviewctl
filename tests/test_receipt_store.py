@@ -7,9 +7,14 @@ import hashlib
 import http.client
 import io
 import json
+import socket
+import socketserver
+import ssl
 import threading
+import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
@@ -26,7 +31,34 @@ def receipt_bytes() -> bytes:
 
 
 @pytest.fixture
-def server():
+def tls_context(tmp_path, monkeypatch):
+    # Synthetic localhost-only TLS identity, never a provider credential.
+    certificate = tmp_path / "local-test.pem"
+    certificate.write_text("""-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQguZ7VE+YDf2YLYlAD
+PwHpV8G6qBdQmSuYZ4/NoscimbGhRANCAATdBwY1MzXe19Md6LjZb0UFIuP+qxRH
+yqto7JZmJq+29WlGVBcsD44OrgXbvH9MoJWBdyOED+nqJuNhWNR3Q12+
+-----END PRIVATE KEY-----
+-----BEGIN CERTIFICATE-----
+MIIBjzCCATagAwIBAgIUG58ph7NVQodoWShYrbYeFsnZ2fYwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTAwMjE0MjUyMFoYDzIxMjYwOTA4
+MTQyNTIwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAATdBwY1MzXe19Md6LjZb0UFIuP+qxRHyqto7JZmJq+29WlGVBcsD44O
+rgXbvH9MoJWBdyOED+nqJuNhWNR3Q12+o2QwYjAdBgNVHQ4EFgQUkMZtqYcQpPtm
+cSDxYYyul98+1z4wHwYDVR0jBBgwFoAUkMZtqYcQpPtmcSDxYYyul98+1z4wDwYD
+VR0TAQH/BAUwAwEB/zAPBgNVHREECDAGhwR/AAABMAoGCCqGSM49BAMCA0cAMEQC
+IACcyejT5Jy599fapd8QG80puJh5O8c/f2sDC/8xnPt6AiA5r0Vv2NgKjSRoMCOn
+qTVHjKQc3rZc9TDL3bPoflsjLA==
+-----END CERTIFICATE-----
+""")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certificate)
+    monkeypatch.setenv("SSL_CERT_FILE", str(certificate))
+    return context
+
+
+@pytest.fixture
+def server(request):
     state = SimpleNamespace(objects={}, requests=[], status=None)
 
     class Handler(BaseHTTPRequestHandler):
@@ -58,9 +90,15 @@ def server():
             self.wfile.write(body or b"")
 
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    scheme = "http"
+    if getattr(request, "param", None) == "tls":
+        httpd.socket = request.getfixturevalue("tls_context").wrap_socket(
+            httpd.socket, server_side=True
+        )
+        scheme = "https"
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
-    state.endpoint = f"http://127.0.0.1:{httpd.server_port}"
+    state.endpoint = f"{scheme}://127.0.0.1:{httpd.server_port}"
     yield state
     httpd.shutdown()
     httpd.server_close()
@@ -184,7 +222,7 @@ def test_environment_token_and_explicit_token_override(monkeypatch, fake_http):
     make_store().push(receipt_bytes())
     assert fake_http.calls[0][0].get_header("Authorization") == "Bearer environment-token"
     assert fake_http.calls[1][0].get_header("Authorization") == "Bearer local-test-token"
-    assert all(timeout == 1 for _, timeout in fake_http.calls)
+    assert all(0 < timeout <= 1 for _, timeout in fake_http.calls)
 
 
 @pytest.mark.parametrize(
@@ -550,21 +588,47 @@ def test_stored_receipt_is_immutable(server):
 
 
 @pytest.mark.parametrize("method", ["push", "pull"])
-def test_deeply_nested_receipt_is_a_safe_content_failure(fake_http, method):
+@pytest.mark.parametrize("decoder", ["native", "python"])
+def test_deeply_nested_receipt_is_a_safe_content_failure(fake_http, monkeypatch, method, decoder):
     from reviewctl.cli import receipt_bytes_violations
 
-    # Python 3.14's C JSON decoder can exceed the Python recursion limit.
-    # Stay below the byte bound while exceeding its native stack guard as well.
-    depth = 100_000
+    # Native decoders may accept very deep arrays, even on a bounded stack.
+    # Also exercise the actual stdlib Python fallback: its real recursion limit
+    # provides deterministic exhaustion without a fabricated verifier exception.
+    if decoder == "python":
+        monkeypatch.setattr(json.scanner, "make_scanner", json.scanner.py_make_scanner)
+    depth = 10_000
     raw = b"[" * depth + b"]" * depth
-    with pytest.raises(RecursionError):
-        receipt_bytes_violations(raw)
     argument = raw
     if method == "pull":
         artifact = canonical_json(envelope(raw))
         fake_http.outcomes.append(Response(artifact))
         argument = object_digest(artifact)
-    assert_error(lambda: getattr(make_store(), method)(argument), "receipt_invalid")
+
+    def verify_and_store():
+        if decoder == "python":
+            with pytest.raises(RecursionError):
+                receipt_bytes_violations(raw)
+        else:
+            try:
+                violations = receipt_bytes_violations(raw)
+            except RecursionError:
+                pass
+            else:
+                assert violations == ("receipt-object",)
+        assert_error(lambda: getattr(make_store(), method)(argument), "receipt_invalid")
+
+    original_stack_size = threading.stack_size()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        try:
+            threading.stack_size(256 * 1024)
+            future = executor.submit(verify_and_store)
+        finally:
+            # submit starts the worker synchronously; restore before waiting,
+            # including when thread creation or the worker itself fails.
+            threading.stack_size(original_stack_size)
+        future.result(timeout=10)
+    assert threading.stack_size() == original_stack_size
     assert len(fake_http.calls) == (method == "pull")
 
 
@@ -681,3 +745,301 @@ def test_invalid_v2_rejected_even_with_recomputed_digests(fake_http, canonical_v
         argument = object_digest(artifact)
     assert_error(lambda: getattr(make_store(), method)(argument), "receipt_invalid")
     assert len(fake_http.calls) == (method == "pull")
+
+
+@pytest.fixture
+def slow_server(request):
+    artifact = canonical_json(envelope(receipt_bytes()))
+    state = SimpleNamespace(mode="body", requests=[], stop=threading.Event(), artifact=artifact)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.respond()
+
+        def do_GET(self):
+            self.respond()
+
+        def respond(self):
+            state.requests.append(self.command)
+            try:
+                if state.mode == "upload":
+                    # Do not drain the large request; force the client's send to block.
+                    self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+                    state.stop.wait(5)
+                    return
+                if self.command == "POST":
+                    self.rfile.read(int(self.headers["Content-Length"]))
+                status = 409 if state.mode in {"conflict", "conflict-headers"} else 201
+                if self.command == "GET":
+                    status = 200
+                body = artifact if self.command == "GET" else b""
+                if state.mode in {"headers", "conflict-headers"}:
+                    self.wfile.write(f"HTTP/1.1 {status} OK\r\nX-Slow: ".encode())
+                    for _ in range(12):
+                        if state.stop.wait(0.2):
+                            return
+                        self.wfile.write(b"x")
+                    self.wfile.write(
+                        b"\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n"
+                    )
+                else:
+                    if state.mode == "conflict" and self.command == "POST":
+                        state.stop.wait(0.65)
+                    self.send_response(status)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                if state.mode == "body":
+                    for byte in body[:12]:
+                        if state.stop.wait(0.2):
+                            return
+                        self.wfile.write(bytes([byte]))
+                    body = body[12:]
+                elif state.mode == "conflict" and self.command == "GET":
+                    state.stop.wait(0.65)
+                self.wfile.write(body)
+            except OSError:
+                pass  # Deadline cancellation must close the peer while it is still sending.
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    scheme = "http"
+    if getattr(request, "param", None) == "tls":
+        httpd.socket = request.getfixturevalue("tls_context").wrap_socket(
+            httpd.socket, server_side=True
+        )
+        scheme = "https"
+    thread = threading.Thread(target=lambda: httpd.serve_forever(poll_interval=0.02))
+    thread.start()
+    state.endpoint = f"{scheme}://127.0.0.1:{httpd.server_port}"
+    try:
+        yield state
+    finally:
+        state.stop.set()
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join()
+
+
+@pytest.mark.parametrize(
+    ("mode", "method"),
+    [
+        ("headers", "push"),
+        ("headers", "pull"),
+        ("conflict-headers", "push"),
+        ("body", "pull"),
+        ("conflict", "push"),
+        ("upload", "push"),
+    ],
+)
+@pytest.mark.parametrize("slow_server", ["http", "tls"], indirect=True)
+def test_total_deadline_cancels_real_slow_io(slow_server, monkeypatch, mode, method):
+    from reviewctl.receipt_store import MAX_RECEIPT_BYTES
+
+    slow_server.mode = mode
+    duplicates = []
+    original_dup = socket.socket.dup
+
+    def track_dup(sock):
+        duplicate = original_dup(sock)
+        duplicates.append(duplicate)
+        return duplicate
+
+    monkeypatch.setattr(socket.socket, "dup", track_dup)
+    raw = receipt_bytes()
+    if mode == "upload":
+        raw += b" " * (MAX_RECEIPT_BYTES - len(raw))
+    argument = raw if method == "push" else object_digest(slow_server.artifact)
+    started = time.monotonic()
+    assert_error(
+        lambda: getattr(make_store(slow_server.endpoint), method)(argument),
+        "evidence_store_unavailable",
+        retryable=True,
+    )
+    elapsed = time.monotonic() - started
+    assert 0.8 <= elapsed < 1.8
+    expected = ["POST"] if method == "push" else ["GET"]
+    assert slow_server.requests == (["POST", "GET"] if mode == "conflict" else expected)
+    assert duplicates and all(sock.fileno() == -1 for sock in duplicates)
+    assert not any(t.name == "reviewctl-receipt-deadline" for t in threading.enumerate())
+
+
+@pytest.fixture
+def deadline_sockets(monkeypatch):
+    duplicates = []
+    original_dup = socket.socket.dup
+
+    def track_dup(sock):
+        duplicate = original_dup(sock)
+        duplicates.append(duplicate)
+        return duplicate
+
+    monkeypatch.setattr(socket.socket, "dup", track_dup)
+    yield duplicates
+    assert all(sock.fileno() == -1 for sock in duplicates)
+    assert not any(t.name == "reviewctl-receipt-deadline" for t in threading.enumerate())
+
+
+@pytest.mark.parametrize("server", ["tls"], indirect=True)
+def test_https_roundtrip_uses_default_certificate_verification(server, deadline_sockets):
+    store = make_store(server.endpoint)
+    stored = store.push(receipt_bytes())
+    assert store.pull(stored.object_digest) == stored
+    assert deadline_sockets
+
+
+@pytest.mark.parametrize("server", ["tls"], indirect=True)
+@pytest.mark.parametrize("failure", ["untrusted", "hostname"])
+def test_https_rejects_untrusted_certificate_and_wrong_hostname(
+    server, monkeypatch, deadline_sockets, failure
+):
+    endpoint = server.endpoint
+    if failure == "untrusted":
+        monkeypatch.delenv("SSL_CERT_FILE")
+    else:
+        endpoint = endpoint.replace("127.0.0.1", "mismatch.invalid")
+        original_addresses = socket.getaddrinfo
+
+        def local_addresses(host, port, **kwargs):
+            assert host == "mismatch.invalid"
+            return original_addresses("127.0.0.1", port, **kwargs)
+
+        monkeypatch.setattr(socket, "getaddrinfo", local_addresses)
+        monkeypatch.setenv("no_proxy", "mismatch.invalid")
+    assert_error(
+        lambda: make_store(endpoint).push(receipt_bytes()),
+        "evidence_store_unavailable",
+        retryable=True,
+    )
+    assert not server.requests  # No Authorization header was sent without verified TLS.
+    assert deadline_sockets
+
+
+def test_deadline_cancels_stalled_real_tls_handshake(deadline_sockets):
+    stop = threading.Event()
+    received = threading.Event()
+
+    class Handler(socketserver.BaseRequestHandler):
+        def handle(self):
+            assert self.request.recv(4096)  # A real TLS ClientHello, not an HTTP request.
+            received.set()
+            stop.wait(3)
+
+    with socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler) as server:
+        thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.02))
+        thread.start()
+        try:
+            endpoint = f"https://127.0.0.1:{server.server_address[1]}"
+            started = time.monotonic()
+            assert_error(
+                lambda: make_store(endpoint).push(receipt_bytes()),
+                "evidence_store_unavailable",
+                retryable=True,
+            )
+            assert 0.8 <= time.monotonic() - started < 1.8
+            assert received.is_set()
+            assert deadline_sockets
+        finally:
+            stop.set()
+            server.shutdown()
+            thread.join()
+
+
+def test_refused_connection_is_safe_and_closes_descriptors(deadline_sockets):
+    with socket.socket() as reserved:
+        reserved.bind(("127.0.0.1", 0))  # Bound but not listening: guaranteed refusal.
+        endpoint = f"http://127.0.0.1:{reserved.getsockname()[1]}"
+        assert_error(
+            lambda: make_store(endpoint).push(receipt_bytes()),
+            "evidence_store_unavailable",
+            retryable=True,
+        )
+    assert deadline_sockets
+
+
+def test_all_resolved_addresses_refused_closes_descriptors(monkeypatch, deadline_sockets):
+    attempts = []
+
+    def refuse(sock, address):
+        attempts.append(address)
+        raise ConnectionRefusedError("synthetic OS refusal")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    assert_error(
+        lambda: make_store().push(receipt_bytes()),
+        "evidence_store_unavailable",
+        retryable=True,
+    )
+    assert attempts
+    assert len(deadline_sockets) == len(attempts)
+
+
+def test_deadline_survives_failed_address_before_slow_connection(
+    slow_server, monkeypatch, deadline_sockets
+):
+    original_addresses = socket.getaddrinfo
+    original_connect = socket.socket.connect
+    attempts = []
+
+    def addresses(host, port, **kwargs):
+        resolved = original_addresses(host, port, **kwargs)
+        return resolved + resolved
+
+    def refuse_first(sock, address):
+        attempts.append(address)
+        if len(attempts) == 1:
+            # A bound, non-listening port times out on some operating systems.
+            # Model the OS refusal deterministically, then use real slow HTTP.
+            raise ConnectionRefusedError("synthetic first-address refusal")
+        return original_connect(sock, address)
+
+    monkeypatch.setattr(socket, "getaddrinfo", addresses)
+    monkeypatch.setattr(socket.socket, "connect", refuse_first)
+    assert_error(
+        lambda: make_store(slow_server.endpoint).pull(object_digest(slow_server.artifact)),
+        "evidence_store_unavailable",
+        retryable=True,
+    )
+    assert len(attempts) == 2
+    assert len(deadline_sockets) == 2
+    assert slow_server.requests == ["GET"]
+
+
+def test_expiration_during_socket_registration_prevents_connection(
+    server, monkeypatch, deadline_sockets
+):
+    original = socket.socket.dup
+
+    def slow_duplicate(sock):
+        duplicate = original(sock)
+        time.sleep(1.05)
+        return duplicate
+
+    monkeypatch.setattr(socket.socket, "dup", slow_duplicate)
+    assert_error(
+        lambda: make_store(server.endpoint).push(receipt_bytes()),
+        "evidence_store_unavailable",
+        retryable=True,
+    )
+    assert deadline_sockets
+    assert not server.requests
+
+
+def test_synchronous_dns_may_delay_return_but_never_starts_late_upload(
+    server, monkeypatch, deadline_sockets
+):
+    original = socket.getaddrinfo
+
+    def slow_dns(*args, **kwargs):
+        time.sleep(1.05)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", slow_dns)
+    assert_error(
+        lambda: make_store(server.endpoint).push(receipt_bytes()),
+        "evidence_store_unavailable",
+        retryable=True,
+    )
+    assert not deadline_sockets
+    assert not server.requests

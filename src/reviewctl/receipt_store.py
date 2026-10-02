@@ -8,6 +8,9 @@ import http.client
 import json
 import os
 import re
+import socket
+import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -92,6 +95,95 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _failure("evidence_store_unavailable")
+    return remaining
+
+
+class _Deadline:
+    """Cancel active I/O, never delegate credential-bearing work to a background thread.
+
+    getaddrinfo remains synchronous and cannot be cancelled portably. Its return
+    is checked before creating any socket, so delayed DNS cannot start a late upload.
+    """
+
+    def __init__(self, end: float):
+        self.end = end
+        self.lock = threading.Lock()
+        self.sockets: list[tuple[socket.socket, socket.socket]] = []
+        self.timer = threading.Timer(_remaining(end), self._expire)
+        self.timer.name = "reviewctl-receipt-deadline"
+
+    def __enter__(self):
+        self.timer.start()
+        return self
+
+    def _expire(self):
+        with self.lock:
+            for original, interrupt in self.sockets:
+                try:
+                    # The duplicate still addresses the connection after TLS has
+                    # detached the original socket or HTTP has created a file reader.
+                    interrupt.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass  # A failed connect or already closed peer is harmless.
+                original.close()
+
+    def __exit__(self, *exc):
+        self.timer.cancel()
+        self.timer.join()
+        for original, interrupt in self.sockets:
+            interrupt.close()
+            original.close()
+        _remaining(self.end)
+
+    def _watch(self, sock):
+        with self.lock:
+            _remaining(self.end)
+            self.sockets.append((sock, sock.dup()))
+
+    def connect(self, address, timeout, source_address):
+        _remaining(self.end)
+        addresses = socket.getaddrinfo(*address, type=socket.SOCK_STREAM)
+        _remaining(self.end)
+        for family, kind, protocol, _, target in addresses:
+            _remaining(self.end)
+            sock = socket.socket(family, kind, protocol)
+            try:
+                self._watch(sock)
+                sock.settimeout(_remaining(self.end))
+                sock.connect(target)
+                _remaining(self.end)
+                return sock
+            except OSError:
+                sock.close()
+                _remaining(self.end)
+            except BaseException:
+                sock.close()
+                raise
+        raise OSError("receipt store connection failed")
+
+
+class _DeadlineHandler(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
+    def __init__(self, deadline: _Deadline):
+        urllib.request.HTTPHandler.__init__(self)
+        self.deadline = deadline
+
+    def _connection(self, host, timeout, *, secure=False):
+        connection_type = http.client.HTTPSConnection if secure else http.client.HTTPConnection
+        connection = connection_type(host, timeout=timeout)
+        connection._create_connection = self.deadline.connect
+        return connection
+
+    def http_open(self, request):
+        return self.do_open(self._connection, request)
+
+    def https_open(self, request):
+        return self.do_open(self._connection, request, secure=True)
+
+
 class PotzalReceiptStore:
     """Opt-in byte adapter using explicit credentials and no HTTP redirects."""
 
@@ -127,6 +219,7 @@ class PotzalReceiptStore:
 
     def push(self, raw: bytes) -> StoredReceipt:
         """Verify then publish; reconcile conflicts only by exact CAS byte identity."""
+        deadline = time.monotonic() + self.settings.timeout_seconds
         _verify_receipt(raw)
         artifact = canonical_json(
             {
@@ -141,18 +234,20 @@ class PotzalReceiptStore:
             raise _failure("receipt_invalid")
         digest = "sha256:" + hashlib.sha256(artifact).hexdigest()
         stored = self._stored(digest, raw)
-        status, _ = self._request("POST", digest, artifact)
+        status, _ = self._request("POST", digest, artifact, deadline=deadline)
         if status == 409:
-            _, existing = self._request("GET", digest)
+            _, existing = self._request("GET", digest, deadline=deadline)
             if existing != artifact:
                 raise _failure("evidence_store_failed")
+        _remaining(deadline)
         return stored
 
     def pull(self, digest: str) -> StoredReceipt:
         """Verify object integrity, envelope, project binding, and canonical receipt."""
+        deadline = time.monotonic() + self.settings.timeout_seconds
         if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
             raise _failure("receipt_invalid")
-        _, artifact = self._request("GET", digest)
+        _, artifact = self._request("GET", digest, deadline=deadline)
         if "sha256:" + hashlib.sha256(artifact).hexdigest() != digest:
             raise _failure("receipt_invalid")
         try:
@@ -182,10 +277,11 @@ class PotzalReceiptStore:
         except ValueError, RecursionError:
             raise _failure("receipt_invalid") from None
         _verify_receipt(raw)
+        _remaining(deadline)
         return self._stored(digest, raw)
 
     def _request(
-        self, method: str, digest: str, artifact: bytes | None = None
+        self, method: str, digest: str, artifact: bytes | None = None, *, deadline: float
     ) -> tuple[int, bytes]:
         headers = {"Authorization": "Bearer " + self._token}
         path = "/v1/objects"
@@ -204,21 +300,23 @@ class PotzalReceiptStore:
             request = urllib.request.Request(
                 self.settings.endpoint + path, data=artifact, headers=headers, method=method
             )
-            opener = urllib.request.build_opener(_NoRedirect())
-            try:
-                response = opener.open(request, timeout=self.settings.timeout_seconds)
-            except urllib.error.HTTPError as error:
-                response = error
-            with response:
-                status = response.status
-                if status not in ({201, 409} if method == "POST" else {200}):
-                    code = {
-                        401: "evidence_store_denied",
-                        403: "evidence_store_denied",
-                        404: "evidence_store_missing",
-                    }.get(status, "evidence_store_failed")
-                    raise _failure(code)
-                return status, self._read_artifact(response) if method == "GET" else b""
+            with _Deadline(deadline) as operation:
+                opener = urllib.request.build_opener(_NoRedirect(), _DeadlineHandler(operation))
+                try:
+                    response = opener.open(request, timeout=_remaining(deadline))
+                except urllib.error.HTTPError as error:
+                    response = error
+                with response:
+                    _remaining(deadline)
+                    status = response.status
+                    if status not in ({201, 409} if method == "POST" else {200}):
+                        code = {
+                            401: "evidence_store_denied",
+                            403: "evidence_store_denied",
+                            404: "evidence_store_missing",
+                        }.get(status, "evidence_store_failed")
+                        raise _failure(code)
+                    return status, self._read_artifact(response) if method == "GET" else b""
         except OSError, urllib.error.URLError:
             raise _failure("evidence_store_unavailable") from None
         except ValueError, http.client.HTTPException:

@@ -192,6 +192,23 @@ def test_pull_preserves_conflicting_local_file(tmp_path, monkeypatch, capsys):
     assert "existing bytes were preserved" in capsys.readouterr().err
 
 
+def test_pull_reuses_identical_bytes_with_private_permissions(tmp_path, monkeypatch, capsys):
+    _project(tmp_path)
+    contents = _receipt(tmp_path / "original.json")
+    _, stored = _fake_store(monkeypatch, contents)
+    root = tmp_path / ".reviewctl/shared" / stored.object_digest.removeprefix("sha256:")
+    root.mkdir(parents=True)
+    root.chmod(0o755)
+    target = root / "receipt.json"
+    target.write_bytes(contents)
+    target.chmod(0o644)
+    assert run_cli(["receipts", "pull", stored.object_digest, "--project", str(tmp_path)]) == 0
+    capsys.readouterr()
+    assert target.read_bytes() == contents
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert root.stat().st_mode & 0o777 == 0o700
+
+
 def test_pull_rejects_symlinked_local_target(tmp_path, monkeypatch, capsys):
     _project(tmp_path)
     contents = _receipt(tmp_path / "original.json")
@@ -217,6 +234,109 @@ def test_pull_rejects_symlinked_local_target(tmp_path, monkeypatch, capsys):
     )
     assert target.read_bytes() == contents
     assert json.loads(capsys.readouterr().out)["diagnostic"]["code"] == "evidence_store_failed"
+
+
+@pytest.mark.parametrize("component", ["project", "state"])
+@pytest.mark.parametrize("replacement", ["symlink", "directory"])
+def test_pull_rejects_directory_replacement_before_writing(
+    tmp_path, monkeypatch, capsys, component, replacement
+):
+    project = _project(tmp_path / "project")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    commands, stored = _fake_store(monkeypatch, _receipt(tmp_path / "original.json"))
+
+    class ReplacingStore:
+        def __init__(self, *_args):
+            pass
+
+        def pull(self, _digest):
+            replaced = project if component == "project" else project / ".reviewctl"
+            replaced.rename(tmp_path / "original-directory")
+            if replacement == "symlink":
+                replaced.symlink_to(outside, target_is_directory=True)
+            else:
+                replaced.mkdir()
+            return stored
+
+    monkeypatch.setattr(commands, "PotzalReceiptStore", ReplacingStore)
+    assert (
+        run_cli(
+            [
+                "receipts",
+                "pull",
+                stored.object_digest,
+                "--project",
+                str(project),
+                "--format",
+                "json",
+            ]
+        )
+        == 3
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["diagnostic"]["code"] == "evidence_store_failed"
+    assert result["diagnostic"]["next"]
+    assert not list(outside.rglob("receipt.json"))
+    assert not list(project.rglob("receipt.json"))
+
+
+@pytest.mark.parametrize("reuse", [False, True])
+@pytest.mark.parametrize("component", ["directory", "file"])
+def test_pull_revalidates_advertised_path_after_pinned_write(
+    tmp_path, monkeypatch, capsys, reuse, component
+):
+    from contextlib import contextmanager
+
+    project = _project(tmp_path / "project")
+    commands, stored = _fake_store(monkeypatch, _receipt(tmp_path / "original.json"))
+    root = project / ".reviewctl/shared" / stored.object_digest.removeprefix("sha256:")
+    root.mkdir(parents=True)
+    target = root / "receipt.json"
+    if reuse:
+        target.write_bytes(stored.receipt_bytes)
+    original = commands.confined_relative_regular_descriptor
+    swapped = False
+
+    @contextmanager
+    def replace_after_open(parent, path, flags):
+        nonlocal swapped
+        with original(parent, path, flags) as descriptor:
+            if not swapped:
+                swapped = True
+                if component == "directory":
+                    root.rename(tmp_path / "pinned-original")
+                    root.mkdir()
+                else:
+                    target.rename(tmp_path / "pinned-original.json")
+                target.write_bytes(b"replacement-not-verified")
+            yield descriptor
+
+    monkeypatch.setattr(commands, "confined_relative_regular_descriptor", replace_after_open)
+    assert (
+        run_cli(
+            [
+                "receipts",
+                "pull",
+                stored.object_digest,
+                "--project",
+                str(project),
+                "--format",
+                "json",
+            ]
+        )
+        == 3
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "failed"
+    assert result["diagnostic"]["code"] == "evidence_store_failed"
+    assert target.read_bytes() == b"replacement-not-verified"
+    pinned = (
+        tmp_path / "pinned-original/receipt.json"
+        if component == "directory"
+        else tmp_path / "pinned-original.json"
+    )
+    assert pinned.read_bytes() == stored.receipt_bytes
 
 
 def test_corrupt_journal_stops_publication_before_network(tmp_path, monkeypatch, capsys):

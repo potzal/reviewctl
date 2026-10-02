@@ -5,14 +5,19 @@ from __future__ import annotations
 import json
 import os
 import sys
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from reviewctl.api import ReviewClient
-from reviewctl.artifacts import ArtifactStore
 from reviewctl.errors import ConfigError, Diagnostic, JournalOperationError, exit_code_for
-from reviewctl.filesystem import confined_regular_descriptor, read_confined_bytes
+from reviewctl.filesystem import (
+    confined_directory_descriptor,
+    confined_regular_descriptor,
+    confined_relative_directory_descriptor,
+    confined_relative_regular_descriptor,
+)
 from reviewctl.receipt_store import PotzalReceiptStore, ReceiptStoreError
 
 
@@ -48,6 +53,69 @@ def _read_receipt(path: Path) -> bytes:
         ) from error
 
 
+def _persist_download(client: ReviewClient, digest: str, contents: bytes) -> Path:
+    """Write below the original project/state identities, never re-resolved paths."""
+    parts = ("shared", digest.removeprefix("sha256:"))
+    target = client.project_dir / ".reviewctl" / Path(*parts) / "receipt.json"
+    with ExitStack() as descriptors:
+        project_descriptor = descriptors.enter_context(
+            confined_directory_descriptor(
+                client.project_dir, expected_identity=client._project_identity
+            )
+        )
+        state_descriptor = descriptors.enter_context(
+            confined_relative_directory_descriptor(project_descriptor, (".reviewctl",))
+        )
+        metadata = os.fstat(state_descriptor)
+        if (metadata.st_dev, metadata.st_ino) != client.journal()._parent_identity:
+            raise OSError("project state directory identity changed")
+        output_descriptor = descriptors.enter_context(
+            confined_relative_directory_descriptor(state_descriptor, parts, create=True)
+        )
+        output_metadata = os.fstat(output_descriptor)
+        output_identity = (output_metadata.st_dev, output_metadata.st_ino)
+        os.fchmod(output_descriptor, 0o700)
+        try:
+            with confined_relative_regular_descriptor(
+                output_descriptor, Path("receipt.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            ) as descriptor:
+                receipt_metadata = os.fstat(descriptor)
+                receipt_identity = (receipt_metadata.st_dev, receipt_metadata.st_ino)
+                with os.fdopen(os.dup(descriptor), "wb") as stream:
+                    stream.write(contents)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+        except FileExistsError:
+            with confined_relative_regular_descriptor(
+                output_descriptor, Path("receipt.json"), os.O_RDONLY
+            ) as descriptor:
+                receipt_metadata = os.fstat(descriptor)
+                receipt_identity = (receipt_metadata.st_dev, receipt_metadata.st_ino)
+                with os.fdopen(os.dup(descriptor), "rb") as stream:
+                    existing = stream.read(4 * 1024 * 1024 + 1)
+                if existing != contents:
+                    raise ReceiptStoreError(
+                        Diagnostic(
+                            "receipt_invalid",
+                            "download conflicts with existing local bytes",
+                            next="inspect the local artifact; existing bytes were preserved",
+                        )
+                    ) from None
+                os.fchmod(descriptor, 0o600)
+        advertised_parent = descriptors.enter_context(
+            confined_directory_descriptor(target.parent, expected_identity=output_identity)
+        )
+        advertised_receipt = descriptors.enter_context(
+            confined_relative_regular_descriptor(
+                advertised_parent, Path("receipt.json"), os.O_RDONLY
+            )
+        )
+        metadata = os.fstat(advertised_receipt)
+        if (metadata.st_dev, metadata.st_ino) != receipt_identity:
+            raise OSError("downloaded receipt pathname identity changed")
+    return target
+
+
 def store_receipt(args: Any) -> int:
     payload: dict[str, Any] = {"status": "failed"}
     try:
@@ -74,20 +142,7 @@ def store_receipt(args: Any) -> int:
             payload["status"] = "stored"
         else:
             stored = store.pull(args.digest)
-            root = project / ".reviewctl" / "shared" / stored.object_digest.removeprefix("sha256:")
-            artifacts = ArtifactStore(root)
-            local_path = root / "receipt.json"
-            try:
-                artifacts.write_bytes("receipt.json", stored.receipt_bytes)
-            except FileExistsError:
-                if read_confined_bytes(local_path) != stored.receipt_bytes:
-                    raise ReceiptStoreError(
-                        Diagnostic(
-                            "receipt_invalid",
-                            "download conflicts with existing local bytes",
-                            next="inspect the local artifact; existing bytes were preserved",
-                        )
-                    ) from None
+            local_path = _persist_download(client, stored.object_digest, stored.receipt_bytes)
             event_type = "receipt_retrieved"
             payload["status"] = "retrieved"
         payload.update(
