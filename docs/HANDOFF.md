@@ -17,14 +17,20 @@ merge or change the current review gate.
 
 ## 2026-08-23 product iteration
 
-**2026-10-02 development addendum:** the bounded
+**2026-10-02 integration addendum:** the bounded
 [Potzal integration](POTZAL-INTEGRATION.md) adds opt-in storage/retrieval of
-canonical receipts and local journal observations on the feature branch.
+canonical receipts and local journal observations merged through
+[PR #31](https://github.com/potzal/reviewctl/pull/31) as `2d416af`.
 Potzal's native object API is reused unchanged. It currently gives service-wide
 credential authority, not project isolation, and raw reads do not enforce
 release revocation. Signed exchange and journal federation below remain future
-work. Integration into main, exact-commit review and live Amelia use require
-their own evidence; local development does not establish those states.
+work. Exact-commit review, release publication and live Amelia use require
+their own evidence; integration into main does not establish those states.
+
+The [local-work reconciliation](evidence/2026-10-02-local-pr-reconciliation.md)
+records the useful GitHub hardening slice, archived unadopted governance,
+recoverable cleanup and remaining #12/#19/#4 decisions. Older scope proposals
+were not silently adopted or closed; the v0.3.3 release remains a draft.
 
 The local product loop is now implemented on `main` as a project-first API and
 CLI layer, without a BAML dependency and without a Potzal dependency:

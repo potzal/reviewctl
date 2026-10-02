@@ -13,6 +13,7 @@ from reviewctl.errors import Diagnostic, ReviewctlError
 from reviewctl.github import (
     CommandRunner,
     ReviewPublicationPlan,
+    _metadata_visibility,
     _run_command,
 )
 
@@ -149,7 +150,14 @@ class GitHubPublisher:
             )
         return result.stdout
 
-    def _head(self, plan: ReviewPublicationPlan, *, deadline: float | None = None) -> str:
+    def _head(
+        self,
+        plan: ReviewPublicationPlan,
+        *,
+        deadline: float | None = None,
+        expected_base_sha: str | None = None,
+        expected_visibility: str | None = None,
+    ) -> str:
         endpoint = f"repos/{plan.repository}/pulls/{plan.pull_number}"
         raw = self._run(
             "GitHub pull-request head lookup", ["gh", "api", endpoint], deadline=deadline
@@ -167,6 +175,24 @@ class GitHubPublisher:
                 "github_publication_response_invalid",
                 "GitHub head lookup did not return a commit SHA",
             )
+        if expected_base_sha is not None or expected_visibility is not None:
+            try:
+                base = value["base"]["sha"]
+            except (KeyError, TypeError) as error:
+                raise _failure(
+                    "github_publication_response_invalid",
+                    "GitHub identity lookup did not return a base SHA",
+                ) from error
+            visibility = _metadata_visibility(value)
+            if (
+                not isinstance(base, str)
+                or (expected_base_sha is not None and base.lower() != expected_base_sha)
+                or (expected_visibility is not None and visibility != expected_visibility)
+            ):
+                raise _failure(
+                    "github_source_identity_changed",
+                    "pull-request base or visibility changed before/during publication",
+                )
         return head.lower()
 
     def _page(
@@ -368,7 +394,13 @@ class GitHubPublisher:
             )
         return str(review_id)
 
-    def publish(self, plan: ReviewPublicationPlan) -> PublicationResult:
+    def publish(
+        self,
+        plan: ReviewPublicationPlan,
+        *,
+        expected_base_sha: str | None = None,
+        expected_visibility: str | None = None,
+    ) -> PublicationResult:
         key = publication_key(plan)
         posted: dict[str, Any] | None = None
         skipped: tuple[str, ...] = ()
@@ -379,11 +411,14 @@ class GitHubPublisher:
                 next="run a complete accepted review before publishing",
             )
             return PublicationResult(key, plan.head_sha, "plan_invalid", diagnostic=diagnostic)
-        if not plan.items:
-            return PublicationResult(key, plan.head_sha, "no_findings")
         deadline = time.monotonic() + self.timeout_seconds
         try:
-            initial_head = self._head(plan, deadline=deadline)
+            initial_head = self._head(
+                plan,
+                deadline=deadline,
+                expected_base_sha=expected_base_sha,
+                expected_visibility=expected_visibility,
+            )
             if initial_head != plan.head_sha.lower():
                 diagnostic = Diagnostic(
                     "github_publication_stale_head",
@@ -397,19 +432,21 @@ class GitHubPublisher:
                     observed_head_sha=initial_head,
                     diagnostic=diagnostic,
                 )
+            if not plan.items:
+                return PublicationResult(
+                    key, plan.head_sha, "no_findings", observed_head_sha=initial_head
+                )
             existing = self._existing_bodies(plan, deadline=deadline)
             pending = tuple(
                 item for item in plan.items if not any(item.marker in body for body in existing)
             )
             skipped = tuple(item.finding_id for item in plan.items if item not in pending)
-            if not pending:
-                return PublicationResult(
-                    key,
-                    plan.head_sha,
-                    "skipped_duplicate",
-                    skipped_finding_ids=skipped,
-                )
-            prepost_head = self._head(plan, deadline=deadline)
+            prepost_head = self._head(
+                plan,
+                deadline=deadline,
+                expected_base_sha=expected_base_sha,
+                expected_visibility=expected_visibility,
+            )
             if prepost_head != plan.head_sha.lower():
                 diagnostic = Diagnostic(
                     "github_publication_stale_head",
@@ -424,13 +461,26 @@ class GitHubPublisher:
                     observed_head_sha=prepost_head,
                     diagnostic=diagnostic,
                 )
+            if not pending:
+                return PublicationResult(
+                    key,
+                    plan.head_sha,
+                    "skipped_duplicate",
+                    skipped_finding_ids=skipped,
+                    observed_head_sha=prepost_head,
+                )
             review_id = self._post(plan, pending, deadline=deadline)
             posted = {"summaryCommentId": review_id, "comments": (), "commentIds": ()}
             posted["comments"] = self._published_comments(
                 plan, review_id, pending, deadline=deadline
             )
             posted["commentIds"] = tuple(comment.comment_id for comment in posted["comments"])
-            observed_head = self._head(plan, deadline=deadline)
+            observed_head = self._head(
+                plan,
+                deadline=deadline,
+                expected_base_sha=expected_base_sha,
+                expected_visibility=expected_visibility,
+            )
             if observed_head != plan.head_sha.lower():
                 diagnostic = Diagnostic(
                     "github_publication_stale_head_race",
@@ -459,11 +509,14 @@ class GitHubPublisher:
                 observed_head_sha=observed_head,
             )
         except GitHubPublisherError as error:
-            status = (
-                "reconciliation_incomplete"
-                if error.diagnostic.code == "publication_reconciliation_incomplete"
-                else "failed"
-            )
+            if posted is not None and error.diagnostic.code == "github_source_identity_changed":
+                status = "stale_head_race"
+            else:
+                status = (
+                    "reconciliation_incomplete"
+                    if error.diagnostic.code == "publication_reconciliation_incomplete"
+                    else "failed"
+                )
             return PublicationResult(
                 key,
                 plan.head_sha,

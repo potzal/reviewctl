@@ -452,6 +452,19 @@ def github_review_project(args: Any) -> int:
     except (OSError, UnicodeError, ValueError) as error:
         return _diagnostic_result(Diagnostic("invalid_request", str(error)), args.format)
 
+    if snapshot.visibility == "private" and (
+        client.config.project.visibility == "public"
+        or client.config.project.privacy_mode == "personal"
+    ):
+        return _diagnostic_result(
+            Diagnostic(
+                "privacy_denied",
+                "GitHub reports private source but the project classification is weaker",
+                next="set project.visibility=private and privacy_mode=private or sensitive",
+            ),
+            args.format,
+        )
+
     try:
         with _materialized_github_files(project, snapshot) as files:
             source_root = files[0].parent if files else None
@@ -530,6 +543,21 @@ def github_review_project(args: Any) -> int:
         findings=findings,
         review_status=plan_status,
     )
+    freshness_diagnostic: Diagnostic | None = None
+    if plan.executable:
+        try:
+            live_identity = LocalGitHubSource(project).observe_identity(snapshot.ref)
+        except GitHubSourceError as error:
+            freshness_diagnostic = error.diagnostic
+        else:
+            if live_identity != (snapshot.base_sha, snapshot.head_sha, snapshot.visibility):
+                freshness_diagnostic = Diagnostic(
+                    "github_source_identity_changed",
+                    "pull-request base, head, or visibility changed during review",
+                    next="rerun the bounded review for the current pull-request identity",
+                )
+        if freshness_diagnostic is not None:
+            plan = replace(plan, executable=False, reason=freshness_diagnostic.code)
     publication_plan_artifact: Path | None = None
     if formal_receipt_path is not None:
         try:
@@ -564,7 +592,11 @@ def github_review_project(args: Any) -> int:
                 "headSha": plan.head_sha,
             }
         )
-        publication = GitHubPublisher(project).publish(plan)
+        publication = GitHubPublisher(project).publish(
+            plan,
+            expected_base_sha=snapshot.base_sha,
+            expected_visibility=snapshot.visibility,
+        )
         _record_github_publication_events(client, plan, publication)
     review_payload = _result_payload(result)
     review_payload["formalReceipt"] = (
@@ -577,6 +609,11 @@ def github_review_project(args: Any) -> int:
         "snapshot": snapshot.to_context(),
         "review": review_payload,
         "publicationPlan": _github_plan_payload(plan),
+        "sourceFreshness": {
+            "checked": plan_status == "accepted",
+            "matches": freshness_diagnostic is None if plan_status == "accepted" else None,
+            "diagnostic": freshness_diagnostic.to_dict() if freshness_diagnostic else None,
+        },
         "publicationPlanArtifact": (
             str(publication_plan_artifact) if publication_plan_artifact is not None else None
         ),
@@ -614,6 +651,8 @@ def github_review_project(args: Any) -> int:
             print(f"diagnostic: {receipt_diagnostic.code}: {receipt_diagnostic.message}")
     if receipt_diagnostic is not None:
         return exit_code_for(receipt_diagnostic.code)
+    if freshness_diagnostic is not None:
+        return exit_code_for(freshness_diagnostic.code)
     if result.status != "accepted":
         return exit_code_for(result.status)
     if publication is not None and publication.status not in {

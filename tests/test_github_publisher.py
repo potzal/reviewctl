@@ -72,10 +72,12 @@ class FakeRunner:
         self,
         *,
         head_values: list[str] | None = None,
+        base_values: list[str] | None = None,
         comments: dict[int, list[dict]] | None = None,
         reviews: dict[int, list[dict]] | None = None,
     ) -> None:
         self.head_values = list(head_values or [HEAD])
+        self.base_values = list(base_values or [BASE])
         self.comments = comments or {1: []}
         self.reviews = reviews or {1: []}
         self.calls: list[tuple[str, ...]] = []
@@ -102,7 +104,18 @@ class FakeRunner:
             )
         if endpoint == "repos/example/project/pulls/7":
             value = self.head_values.pop(0) if len(self.head_values) > 1 else self.head_values[0]
-            return CommandResult(0, json.dumps({"head": {"sha": value}}).encode(), b"")
+            base = self.base_values.pop(0) if len(self.base_values) > 1 else self.base_values[0]
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "head": {"sha": value},
+                        "base": {"sha": base},
+                        "repository": {"visibility": "private"},
+                    }
+                ).encode(),
+                b"",
+            )
         if endpoint.endswith("/comments"):
             if endpoint.endswith("/reviews/9001/comments"):
                 page = int(
@@ -133,6 +146,94 @@ def post_calls(runner: FakeRunner) -> list[tuple[str, ...]]:
         for call in runner.calls
         if "--method" in call and call[call.index("--method") + 1] == "POST"
     ]
+
+
+@pytest.mark.parametrize("base_values", [[OTHER_HEAD], [BASE, OTHER_HEAD]])
+def test_publisher_refuses_base_change_with_unchanged_head(
+    tmp_path: Path, base_values: list[str]
+) -> None:
+    runner = FakeRunner(base_values=base_values)
+
+    result = GitHubPublisher(tmp_path, runner=runner).publish(
+        make_plan(), expected_base_sha=BASE, expected_visibility="private"
+    )
+
+    assert result.status == "failed"
+    assert result.diagnostic is not None
+    assert result.diagnostic.code == "github_source_identity_changed"
+    assert post_calls(runner) == []
+
+
+def test_publisher_records_identity_race_after_post_without_retry(tmp_path: Path) -> None:
+    runner = FakeRunner(base_values=[BASE, BASE, OTHER_HEAD])
+    result = GitHubPublisher(tmp_path, runner=runner).publish(
+        make_plan(), expected_base_sha=BASE, expected_visibility="private"
+    )
+    assert result.status == "stale_head_race"
+    assert result.summary_comment_id == "9001"
+    assert result.published_comment_ids == ("9002",)
+    assert result.diagnostic.code == "github_source_identity_changed"
+    assert len(post_calls(runner)) == 1
+
+
+@pytest.mark.parametrize(
+    "metadata", [{"head": {"sha": HEAD}}, {"head": {"sha": HEAD}, "base": {"sha": None}}]
+)
+def test_publisher_rejects_missing_base_identity(tmp_path: Path, metadata) -> None:
+    class MalformedIdentityRunner(FakeRunner):
+        def __call__(self, command, **kwargs):
+            if command[2] == "repos/example/project/pulls/7":
+                return CommandResult(0, json.dumps(metadata).encode(), b"")
+            return super().__call__(command, **kwargs)
+
+    runner = MalformedIdentityRunner()
+    result = GitHubPublisher(tmp_path, runner=runner).publish(make_plan(), expected_base_sha=BASE)
+    assert result.status == "failed"
+    assert result.diagnostic.code in {
+        "github_publication_response_invalid",
+        "github_source_identity_changed",
+    }
+    assert post_calls(runner) == []
+
+
+@pytest.mark.parametrize(
+    ("expected_base_sha", "expected_visibility"),
+    [(BASE, None), (None, "private")],
+)
+def test_publisher_accepts_independent_identity_expectations(
+    tmp_path: Path, expected_base_sha: str | None, expected_visibility: str | None
+) -> None:
+    runner = FakeRunner()
+
+    result = GitHubPublisher(tmp_path, runner=runner).publish(
+        make_plan(),
+        expected_base_sha=expected_base_sha,
+        expected_visibility=expected_visibility,
+    )
+
+    assert result.status == "published"
+    assert len(post_calls(runner)) == 1
+
+
+@pytest.mark.parametrize(
+    ("expected_base_sha", "expected_visibility"),
+    [(OTHER_HEAD, None), (None, "public")],
+)
+def test_publisher_refuses_independent_identity_mismatch(
+    tmp_path: Path, expected_base_sha: str | None, expected_visibility: str | None
+) -> None:
+    runner = FakeRunner()
+
+    result = GitHubPublisher(tmp_path, runner=runner).publish(
+        make_plan(),
+        expected_base_sha=expected_base_sha,
+        expected_visibility=expected_visibility,
+    )
+
+    assert result.status == "failed"
+    assert result.diagnostic is not None
+    assert result.diagnostic.code == "github_source_identity_changed"
+    assert post_calls(runner) == []
 
 
 def test_publisher_reconciles_both_comment_and_review_bodies_and_posts_one_group(
@@ -223,6 +324,41 @@ def test_publisher_skips_existing_markers_even_on_a_later_head() -> None:
     assert result.status == "skipped_duplicate"
     assert result.published_comment_ids == ()
     assert result.skipped_finding_ids == ("finding-inline", "finding-summary")
+    assert post_calls(runner) == []
+
+
+def test_publisher_rechecks_head_before_confirming_all_findings_are_duplicates() -> None:
+    plan = make_plan()
+    runner = FakeRunner(
+        head_values=[HEAD, OTHER_HEAD],
+        comments={1: [{"id": 1, "body": plan.items[0].body}]},
+        reviews={1: [{"id": 2, "body": plan.items[1].body}]},
+    )
+
+    result = GitHubPublisher(Path("."), runner=runner).publish(plan)
+
+    assert result.status == "stale_head"
+    assert result.observed_head_sha == OTHER_HEAD
+    assert result.skipped_finding_ids == ("finding-inline", "finding-summary")
+    assert post_calls(runner) == []
+
+
+def test_publisher_checks_head_even_when_accepted_review_has_no_findings() -> None:
+    plan = build_publication_plan(
+        make_snapshot(),
+        project_id="project-1",
+        review_id="review-1",
+        findings=(),
+        review_status="accepted",
+    )
+    runner = FakeRunner(head_values=[OTHER_HEAD])
+
+    result = GitHubPublisher(Path("."), runner=runner).publish(plan)
+
+    assert result.status == "stale_head"
+    assert result.observed_head_sha == OTHER_HEAD
+    assert result.diagnostic is not None
+    assert result.diagnostic.code == "github_publication_stale_head"
     assert post_calls(runner) == []
 
 
@@ -556,7 +692,11 @@ def test_publisher_returns_plan_and_empty_findings_statuses() -> None:
     empty = build_publication_plan(
         make_snapshot(), project_id="p", review_id="r", findings=(), review_status="accepted"
     )
-    assert GitHubPublisher(Path("."), runner=FakeRunner()).publish(empty).status == "no_findings"
+    runner = FakeRunner()
+    empty_result = GitHubPublisher(Path("."), runner=runner).publish(empty)
+    assert empty_result.status == "no_findings"
+    assert empty_result.observed_head_sha == HEAD
+    assert runner.calls == [("gh", "api", "repos/example/project/pulls/7")]
 
 
 def test_publisher_rejects_non_text_reconciliation_body() -> None:

@@ -5,13 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 from reviewctl import __version__
-from reviewctl.api import Finding, ReviewResult, verify_project_receipt
+from reviewctl.api import Finding, ReviewResult, finding_id, verify_project_receipt
 from reviewctl.artifacts import ArtifactStore
 from reviewctl.contracts import (
     ContractContext,
@@ -207,6 +207,7 @@ def write_github_v2_receipt(
     try:
         checkpoint = _load_json_bytes(read_confined_bytes(receipt_path), label="project checkpoint")
         profile = client.config.profile(profile_name)
+        client_origin_id = client.journal().origin_id
     except GitHubReceiptError:
         raise
     except (AttributeError, OSError, TypeError, ValueError) as error:
@@ -220,6 +221,14 @@ def write_github_v2_receipt(
         or profile.response_contract != "findings-json"
     ):
         raise GitHubReceiptError("project checkpoint is not an accepted findings-json checkpoint")
+
+    if (
+        checkpoint.get("configDigest") != client.config.digest
+        or checkpoint.get("projectId") != client.config.project.project_id
+        or checkpoint.get("originId") != client_origin_id
+        or checkpoint.get("privacyMode") != client.config.project.privacy_mode
+    ):
+        raise GitHubReceiptError("project checkpoint configuration no longer matches this client")
 
     configured_routes = list(profile.parsed_routes)
     expanded_routes = [route for route in configured_routes for _ in range(profile.max_attempts)]
@@ -359,6 +368,10 @@ def write_github_v2_receipt(
     usage = checkpoint.get("usage")
     if not _valid_usage(usage, expected_model=selected_route.model):
         raise GitHubReceiptError("accepted response usage does not match the selected route")
+    if checkpoint.get("findings") != [
+        {**asdict(finding), "findingId": finding_id(finding)} for finding in result.findings
+    ]:
+        raise GitHubReceiptError("project checkpoint findings differ from the review result")
     normalized_review = _plain_json(evaluation.value)
     routes = [{"model": route.model, "transport": route.transport} for route in configured_routes]
     transports = {route.transport for route in configured_routes}

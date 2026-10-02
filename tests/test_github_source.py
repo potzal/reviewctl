@@ -106,6 +106,44 @@ def test_local_source_requests_diff_media_type(tmp_path: Path) -> None:
     ) in runner.calls
 
 
+def test_observe_identity_uses_only_metadata_without_source(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    identity = LocalGitHubSource(tmp_path, runner=runner).observe_identity(
+        PullRequestRef("example/project", 7)
+    )
+
+    assert identity == (BASE, HEAD, "private")
+    assert runner.calls == [("gh", "api", "repos/example/project/pulls/7")]
+
+
+@pytest.mark.parametrize(
+    ("metadata", "code"),
+    [
+        (b"not-json", "github_metadata_invalid"),
+        ({"base": [], "head": {"sha": HEAD}}, "github_metadata_invalid"),
+        ({"base": {"sha": 1}, "head": {"sha": HEAD}}, "github_metadata_invalid"),
+        ({"base": {"sha": "bad"}, "head": {"sha": HEAD}}, "github_metadata_invalid"),
+        ({"base": {"sha": BASE}, "head": {"sha": "bad"}}, "github_metadata_invalid"),
+        ({"base": {"sha": BASE}, "head": {"sha": None}}, "github_metadata_invalid"),
+        ({"base": {"sha": BASE}, "head": {"sha": HEAD}}, "github_visibility_unknown"),
+        (
+            {"base": {"sha": BASE}, "head": {"sha": HEAD}, "repository": {"visibility": []}},
+            "github_visibility_unknown",
+        ),
+    ],
+)
+def test_observe_identity_reports_malformed_metadata(tmp_path: Path, metadata, code: str) -> None:
+    def runner(command, **kwargs):
+        raw = metadata if isinstance(metadata, bytes) else json.dumps(metadata).encode()
+        return CommandResult(0, raw, b"")
+
+    with pytest.raises(GitHubSourceError) as error:
+        LocalGitHubSource(tmp_path, runner=runner).observe_identity(
+            PullRequestRef("example/project", 7)
+        )
+    assert error.value.diagnostic.code == code
+
+
 def test_local_source_enforces_one_deadline_across_all_commands(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -189,6 +227,45 @@ def test_local_source_rejects_identity_change_after_diff_before_materialization(
 
 
 @pytest.mark.parametrize(
+    ("rechecked_repository", "base_repository", "expected_code"),
+    [
+        ({"visibility": "public"}, None, "github_source_identity_changed"),
+        ({}, None, "github_visibility_unknown"),
+        (None, {"visibility": "public"}, "github_source_identity_changed"),
+        (None, {}, "github_visibility_unknown"),
+    ],
+)
+def test_local_source_rechecks_visibility_before_materializing_source(
+    tmp_path: Path,
+    rechecked_repository: dict | None,
+    base_repository: dict | None,
+    expected_code: str,
+) -> None:
+    class VisibilityRaceRunner(FakeRunner):
+        metadata_calls = 0
+
+        def __call__(self, command, *, cwd, timeout_seconds):
+            if _is_metadata_command(command):
+                self.metadata_calls += 1
+                if self.metadata_calls == 2:
+                    self.calls.append(tuple(command))
+                    metadata = {"base": {"sha": BASE}, "head": {"sha": HEAD}}
+                    if rechecked_repository is not None:
+                        metadata["repository"] = rechecked_repository
+                    if base_repository is not None:
+                        metadata["base"]["repo"] = base_repository
+                    return CommandResult(0, json.dumps(metadata).encode(), b"")
+            return super().__call__(command, cwd=cwd, timeout_seconds=timeout_seconds)
+
+    runner = VisibilityRaceRunner()
+    with pytest.raises(GitHubSourceError) as error:
+        LocalGitHubSource(tmp_path, runner=runner).resolve(PullRequestRef("example/project", 7))
+
+    assert error.value.diagnostic.code == expected_code
+    assert not any(command[:2] == ("git", "show") for command in runner.calls)
+
+
+@pytest.mark.parametrize(
     "recheck_metadata",
     [
         b"not-json",
@@ -229,6 +306,22 @@ def test_source_refuses_stale_checkout(tmp_path: Path) -> None:
         LocalGitHubSource(tmp_path, runner=runner).resolve(PullRequestRef("example/project", 7))
 
     assert error.value.diagnostic.code == "github_checkout_stale"
+
+
+def test_source_refuses_empty_diff_before_model_materialization(tmp_path: Path) -> None:
+    class EmptyDiffRunner(FakeRunner):
+        def __call__(self, command, *, cwd, timeout_seconds):
+            if _is_diff_command(command):
+                self.calls.append(tuple(command))
+                return CommandResult(0, b"", b"")
+            return super().__call__(command, cwd=cwd, timeout_seconds=timeout_seconds)
+
+    runner = EmptyDiffRunner()
+    with pytest.raises(GitHubSourceError) as error:
+        LocalGitHubSource(tmp_path, runner=runner).resolve(PullRequestRef("example/project", 7))
+
+    assert error.value.diagnostic.code == "github_source_unsupported"
+    assert not any(command[:2] == ("git", "show") for command in runner.calls)
 
 
 def test_source_refuses_unknown_visibility_before_reading_source(tmp_path: Path) -> None:
