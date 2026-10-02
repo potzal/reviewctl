@@ -67,11 +67,14 @@ The publication namespace appends SHA-256(`project.id`) to the configured base;
 its immutable release is `0.0.0+receipt.<object-digest-hex>`. Project association
 is selected by the publisher; it does not authenticate receipt authorship.
 
-The current offline canonical verifier needs no external files. Consequently
-this adapter does not upload source, raw prompts/responses, logs, sealed
-payloads, a project checkpoint or a journal. A receipt itself may still contain
-paths, findings and confidential metadata; explicitly select an appropriate
-private destination. Receipts up to 4 MiB and artifacts up to 8 MiB are allowed.
+The current offline canonical verifier needs no external files. The adapter
+uploads only the selected receipt bytes in the envelope, not auxiliary source,
+prompt/response, log, sealed-payload or journal files. Project checkpoints are
+rejected. A receipt itself may contain paths, findings, confidential metadata or
+other embedded content, particularly under legacy V1's digest-only rules.
+Verification is not content classification or redaction: inspect the selected
+receipt and explicitly choose an appropriate private destination. Receipts up
+to 4 MiB and artifacts up to 8 MiB are allowed.
 
 Canonical receipt semantics stay unchanged: V1 checks its digest; V2 checks
 structure and digest. Project `receipt.json` checkpoints are rejected by the
