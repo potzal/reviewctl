@@ -33,6 +33,11 @@ evidence features call external tools only when selected:
 Missing optional tools produce a typed unavailable attempt; they never count
 as an accepted review.
 
+Canonical receipts can optionally be stored in a configured Potzal evidence
+service with `reviewctl receipts push` and recovered with `reviewctl receipts
+pull`. See [Potzal integration](docs/POTZAL-INTEGRATION.md) for project identity,
+configuration, commands and the current service-scoped permission boundary.
+
 ## Run a review
 
 For the simpler project-local workflow, initialize once, explicitly add an

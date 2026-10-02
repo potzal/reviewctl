@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from reviewctl.dimensions import normalize_dimensions
 from reviewctl.errors import ConfigError
@@ -27,6 +28,53 @@ TOOL_MODES = frozenset({"none", "read-only"})
 THINKING_LEVELS = frozenset({"off", "minimal", "low", "medium", "high", "xhigh", "max"})
 DEFAULT_USER_CONFIG = Path("~/.config/reviewctl/config.toml")
 PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+@dataclass(frozen=True)
+class PotzalSettings:
+    """Explicit private evidence destination; credentials remain in the environment."""
+
+    endpoint: str
+    namespace: str
+    token_env: str
+    timeout_seconds: int = 30
+
+    def __post_init__(self) -> None:
+        try:
+            endpoint = urlsplit(self.endpoint)
+            port = endpoint.port
+        except (ValueError, TypeError, AttributeError) as error:
+            raise ConfigError("evidence.potzal.endpoint must be an HTTP(S) origin") from error
+        if (
+            not isinstance(self.endpoint, str)
+            or any(character.isspace() or ord(character) < 32 for character in self.endpoint)
+            or endpoint.scheme not in {"https", "http"}
+            or not endpoint.hostname
+            or endpoint.username is not None
+            or endpoint.password is not None
+            or endpoint.path not in {"", "/"}
+            or endpoint.query
+            or endpoint.fragment
+            or port == 0
+            or (endpoint.scheme == "http" and endpoint.hostname not in {"127.0.0.1", "::1"})
+        ):
+            raise ConfigError(
+                "evidence.potzal.endpoint requires HTTPS or literal loopback HTTP, "
+                "without credentials, path, query, or fragment"
+            )
+        object.__setattr__(self, "endpoint", self.endpoint.rstrip("/"))
+        if not isinstance(self.namespace, str) or not re.fullmatch(
+            r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*",
+            self.namespace,
+        ):
+            raise ConfigError("evidence.potzal.namespace must be a lowercase Potzal namespace")
+        if not isinstance(self.token_env, str) or not re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*", self.token_env
+        ):
+            raise ConfigError("evidence.potzal.token_env must name an environment variable")
+        if self.timeout_seconds is None:
+            raise ConfigError("evidence.potzal.timeout_seconds must be a positive integer")
+        _positive_int(self.timeout_seconds, "evidence.potzal.timeout_seconds", 30, maximum=300)
 
 
 @dataclass(frozen=True)
@@ -69,6 +117,7 @@ class ReviewConfig:
     profiles: Mapping[str, ReviewProfile]
     path: Path | None
     digest: str
+    potzal: PotzalSettings | None = None
 
     def profile(self, name: str) -> ReviewProfile:
         try:
@@ -348,6 +397,24 @@ def load_config(
             dimensions=required_dimensions,
         )
     raw_digest = hashlib.sha256(project_raw + b"\n" + user_raw).hexdigest()
+    evidence = merged.get("evidence", {})
+    if not isinstance(evidence, dict):
+        raise ConfigError("evidence must be a TOML table")
+    potzal = None
+    if "potzal" in evidence:
+        if not portable_project_id:
+            raise ConfigError("evidence.potzal requires an explicit stable project.id")
+        settings = evidence["potzal"]
+        if not isinstance(settings, dict):
+            raise ConfigError("evidence.potzal must be a TOML table")
+        if set(settings) - {"endpoint", "namespace", "token_env", "timeout_seconds"}:
+            raise ConfigError("evidence.potzal contains unknown settings")
+        try:
+            potzal = PotzalSettings(**settings)
+        except TypeError as error:
+            raise ConfigError(
+                "evidence.potzal requires endpoint, namespace and token_env"
+            ) from error
     return ReviewConfig(
         project=ProjectSettings(
             project_name,
@@ -360,4 +427,5 @@ def load_config(
         profiles=profiles,
         path=resolved_project or resolved_user,
         digest=raw_digest,
+        potzal=potzal,
     )

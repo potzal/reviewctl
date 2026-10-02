@@ -179,10 +179,13 @@ offline structural verification rather than changing historical v1 meaning.
 ## Current deployment boundary
 
 reviewctl is local-first: its controller, policy decision, evidence assembly,
-and verification run on the user's machine. Project-owned evidence stores are
-a compatible future destination for receipts. Federation is optional future
-work, and Potzal is not a dependency. Potzal or another store may later carry
-signed bundles without owning reviewctl semantics.
+and verification run on the user's machine. The optional
+[Potzal receipt adapter](POTZAL-INTEGRATION.md) stores exact canonical receipt
+bytes as immutable project-associated objects through the native object API.
+Its current authorization is service-scoped; project checks are client-side.
+Federation is optional future work, and Potzal is not a dependency. Signed
+exchange, journal synchronization and server-enforced project isolation remain
+separate future work.
 
 Editable execution is deferred for formal review. Cursor, Claude Code, and
 other interactive editors are also deferred until a backend passes explicit
