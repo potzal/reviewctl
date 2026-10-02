@@ -172,6 +172,41 @@ def test_promotion_writes_a_canonical_v2_receipt(tmp_path: Path) -> None:
     assert payload["receiptSchemaVersion"] == 2
 
 
+@pytest.mark.parametrize("field", ["configDigest", "projectId", "originId", "privacyMode"])
+def test_promotion_rejects_changed_project_binding(tmp_path: Path, field: str) -> None:
+    client, result, snapshot = _accepted_promotion_inputs(tmp_path)
+    result = _resign_checkpoint(
+        result.receipt_path, result, lambda checkpoint: checkpoint.__setitem__(field, "different")
+    )
+
+    with pytest.raises(GitHubReceiptError, match="configuration"):
+        write_github_v2_receipt(
+            client=client,
+            result=result,
+            snapshot=snapshot,
+            receipt_path=result.receipt_path,
+            profile_name="default",
+        )
+
+
+def test_promotion_rejects_findings_different_from_review_result(tmp_path: Path) -> None:
+    client, result, snapshot = _accepted_promotion_inputs(tmp_path)
+    result = _resign_checkpoint(
+        result.receipt_path,
+        result,
+        lambda checkpoint: checkpoint["findings"].append({"title": "hidden"}),
+    )
+
+    with pytest.raises(GitHubReceiptError, match="checkpoint findings"):
+        write_github_v2_receipt(
+            client=client,
+            result=result,
+            snapshot=snapshot,
+            receipt_path=result.receipt_path,
+            profile_name="default",
+        )
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
@@ -434,7 +469,9 @@ def test_promotion_marks_kiro_receipts_and_wraps_persistence_errors(
 ) -> None:
     client, result, snapshot = _accepted_promotion_inputs(tmp_path)
     profile = replace(client.config.profile("default"), routes=("kiro:model",))
-    kiro_client = SimpleNamespace(config=replace(client.config, profiles={"default": profile}))
+    kiro_client = SimpleNamespace(
+        config=replace(client.config, profiles={"default": profile}), journal=client.journal
+    )
     result = _resign_checkpoint(
         result.receipt_path,
         result,

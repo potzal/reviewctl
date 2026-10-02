@@ -606,6 +606,22 @@ def _source_diagnostic(code: str, message: str, *, retryable: bool = False) -> G
     )
 
 
+def _metadata_visibility(metadata: Mapping[str, Any]) -> str | None:
+    repository = metadata.get("repository")
+    if not isinstance(repository, dict):
+        base = metadata.get("base")
+        repository = base.get("repo") if isinstance(base, dict) else None
+    visibility = repository.get("visibility") if isinstance(repository, dict) else None
+    if (not isinstance(visibility, str) or visibility not in {"public", "private"}) and isinstance(
+        repository, dict
+    ):
+        if type(repository.get("private")) is bool:
+            visibility = "private" if repository["private"] else "public"
+    return (
+        visibility if isinstance(visibility, str) and visibility in {"public", "private"} else None
+    )
+
+
 class LocalGitHubSource:
     """Resolve a PR through ``gh`` and materialize content from a local commit."""
 
@@ -664,6 +680,34 @@ class LocalGitHubSource:
                 f"{operation} returned non-UTF-8 content",
             ) from error
 
+    def observe_identity(self, ref: PullRequestRef) -> tuple[str, str, str]:
+        """Read only the live PR base, head, and visibility after a review."""
+        endpoint = f"repos/{ref.repository}/pulls/{ref.number}"
+        raw = self._run("GitHub pull-request identity", ["gh", "api", endpoint])
+        try:
+            metadata = json.loads(self._decode("GitHub pull-request identity", raw))
+            base_sha = metadata["base"]["sha"]
+            head_sha = metadata["head"]["sha"]
+        except (KeyError, TypeError, ValueError) as error:
+            raise _source_diagnostic(
+                "github_metadata_invalid", "GitHub pull-request identity is malformed"
+            ) from error
+        if (
+            not isinstance(base_sha, str)
+            or not _SHA.fullmatch(base_sha)
+            or not isinstance(head_sha, str)
+            or not _SHA.fullmatch(head_sha)
+        ):
+            raise _source_diagnostic(
+                "github_metadata_invalid", "GitHub pull-request identity lacks valid SHAs"
+            )
+        visibility = _metadata_visibility(metadata)
+        if visibility is None:
+            raise _source_diagnostic(
+                "github_visibility_unknown", "repository visibility is unknown after review"
+            )
+        return base_sha.lower(), head_sha.lower(), visibility
+
     def resolve(self, ref: PullRequestRef) -> PullRequestSnapshot:
         deadline = time.monotonic() + self.timeout_seconds
         endpoint = f"repos/{ref.repository}/pulls/{ref.number}"
@@ -697,15 +741,8 @@ class LocalGitHubSource:
                 "github_metadata_invalid",
                 "GitHub pull-request metadata lacks valid base/head SHAs",
             )
-        repository = metadata.get("repository")
-        if not isinstance(repository, dict):
-            base = metadata.get("base")
-            repository = base.get("repo") if isinstance(base, dict) else None
-        visibility = repository.get("visibility") if isinstance(repository, dict) else None
-        if visibility not in {"public", "private"} and isinstance(repository, dict):
-            if type(repository.get("private")) is bool:
-                visibility = "private" if repository["private"] else "public"
-        if visibility not in {"public", "private"}:
+        visibility = _metadata_visibility(metadata)
+        if visibility is None:
             raise _source_diagnostic(
                 "github_visibility_unknown",
                 "repository visibility is unknown; source transfer is blocked",
@@ -775,6 +812,19 @@ class LocalGitHubSource:
                 "source materialization is blocked",
                 retryable=True,
             )
+        rechecked_visibility = _metadata_visibility(metadata_recheck)
+        if rechecked_visibility is None:
+            raise _source_diagnostic(
+                "github_visibility_unknown",
+                "repository visibility became unknown; source materialization is blocked",
+            )
+        if rechecked_visibility != visibility:
+            raise _source_diagnostic(
+                "github_source_identity_changed",
+                "repository visibility changed while source was being fetched; "
+                "source materialization is blocked",
+                retryable=True,
+            )
         try:
             diff_files = _diff_files(diff)
         except _BinaryDiffError as error:
@@ -783,6 +833,11 @@ class LocalGitHubSource:
             raise _source_diagnostic("github_source_unsupported", str(error)) from error
         except ValueError as error:
             raise _source_diagnostic("github_path_invalid", str(error)) from error
+        if not diff_files:
+            raise _source_diagnostic(
+                "github_source_unsupported",
+                "pull-request diff contains no reviewable changed files",
+            )
         if len(diff_files) > MAX_GITHUB_FILES:
             raise _source_diagnostic(
                 "github_source_too_large", "pull request changes exceed the file limit"

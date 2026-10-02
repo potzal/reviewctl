@@ -47,6 +47,16 @@ bodies, rechecks the head immediately before and after the POST, and records
 stale-head races without retrying. It does not support `approve` or
 `request-changes`.
 
+Base SHA and repository visibility are also checked against the snapshot.
+Even zero-findings and duplicate-only results require a fresh head check.
+After the review, `sourceFreshness` reports whether base/head/visibility still
+match; a changed or unavailable identity leaves the historical receipt intact
+but makes the publication plan non-executable. Rerun for the current identity.
+If identity changes after a POST, `stale_head_race` retains observed publication
+IDs: inspect and reconcile those IDs rather than blindly retrying.
+Concurrent publishers are not atomically deduplicated; serialize publication
+externally when several workers share a PR.
+
 The project profile controls the transport and privacy policy. The command
 does not create a GitHub-specific Pi path or bypass the existing fallback,
 contract, journal, and receipt behavior.
@@ -74,6 +84,11 @@ The local source adapter refuses to continue when:
 
 - the checkout `HEAD` differs from the PR head SHA (`github_checkout_stale`);
 - GitHub does not prove public/private visibility (`github_visibility_unknown`);
+- a private repository is configured as public or `privacy_mode=personal`
+  (`privacy_denied`); set `visibility=private` and `privacy_mode=private` or
+  `sensitive` before retrying, without weakening the source classification;
+- base/head/visibility change during capture or review
+  (`github_source_identity_changed`), or there are no reviewable changed files;
 - metadata, paths, source encoding, file count, diff size, or file size exceed
   the bounded contract;
 - `gh` or `git` fails, times out, or returns malformed data.
@@ -82,6 +97,11 @@ Diagnostics are typed and safe for an LLM or automation to consume. They do
 not include command stderr, authorization headers, prompts, raw source, or
 raw provider responses. Retry only after inspecting the diagnostic and fixing
 the source condition; do not treat an unavailable receipt as approval.
+
+Canonical promotion also checks the controller's configuration/project/origin/
+privacy binding and exact checkpoint/result findings. It still refuses
+multi-attempt checkpoints without bound V2 attempt evidence. A digest-valid
+checkpoint is not an authorization or a substitute for that evidence.
 
 ## Publication boundary
 

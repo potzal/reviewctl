@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import reviewctl.project_cli as project_cli
-from reviewctl.api import Finding, ReviewClient, ReviewResult, finding_id
+from reviewctl.api import Finding, ReviewClient, ReviewResult
 from reviewctl.backends import BackendEvidence, BackendExecution, PersistedResponse
 from reviewctl.cli import run_cli
 from reviewctl.errors import Diagnostic, JournalOperationError
@@ -96,6 +96,10 @@ class FakeSource:
         assert ref == PullRequestRef("example/project", 7)
         return snapshot()
 
+    def observe_identity(self, ref: PullRequestRef) -> tuple[str, str, str]:
+        observed = self.resolve(ref)
+        return observed.base_sha, observed.head_sha, observed.visibility
+
 
 class FakeClient:
     request = None
@@ -146,6 +150,7 @@ class FakeClient:
         self.project_dir = project_dir
         self._client = ReviewClient.from_project(project_dir, transports={"pi": self.Transport()})
         self.config = self._client.config
+        self._journal.origin_id = self._client.journal().origin_id
 
     @classmethod
     def from_project(cls, project_dir: Path):
@@ -168,7 +173,9 @@ class FakePublisher:
     def __init__(self, project_dir: Path) -> None:
         self.project_dir = project_dir
 
-    def publish(self, plan):
+    def publish(self, plan, *, expected_base_sha=None, expected_visibility=None):
+        assert expected_base_sha == snapshot().base_sha
+        assert expected_visibility == snapshot().visibility
         type(self).plans.append(plan)
         return type(self).result or PublicationResult(
             publication_key="github:example/project:7:review-1",
@@ -241,7 +248,7 @@ def test_github_review_is_dry_run_and_passes_typed_context_to_existing_flow(
     assert FakeClient.request.source_root == FakeClient.request.files[0].parent
 
 
-def test_github_review_maps_unique_basename_to_snapshot_path_for_inline_target(
+def test_github_review_rejects_findings_changed_after_checkpoint(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     write_config(tmp_path)
@@ -257,36 +264,70 @@ def test_github_review_maps_unique_basename_to_snapshot_path_for_inline_target(
     monkeypatch.setattr("reviewctl.project_cli.LocalGitHubSource", FakeSource)
     monkeypatch.setattr("reviewctl.project_cli.ReviewClient", BasenameClient)
 
-    assert project_cli.github_review_project(github_args(tmp_path, publish=False)) == 0
+    assert project_cli.github_review_project(github_args(tmp_path, publish=False)) == 5
 
     payload = json.loads(capsys.readouterr().out)
-    receipt = json.loads(Path(payload["review"]["receipt"]).read_text())
-    assert payload["review"]["findings"] == [
-        {
-            "severity": "high",
-            "path": "src/app.py",
-            "line": 1,
-            "title": "Handle failure",
-            "evidence": "private evidence",
-            "reproduction": "private reproduction",
-        }
-    ]
-    assert receipt["findings"][0]["path"] == "src%2Fapp.py"
-    assert payload["publicationPlan"]["items"][0]["target"] == {
-        "path": "src/app.py",
-        "line": 1,
-        "side": "RIGHT",
-    }
-    assert payload["publicationPlan"]["items"][0]["findingId"] == finding_id(
-        Finding(
-            severity="high",
-            path="src/app.py",
-            line=1,
-            title="Handle failure",
-            evidence="private evidence",
-            reproduction="private reproduction",
-        )
+    assert payload["review"]["receipt"] is None
+    assert payload["review"]["findings"] == []
+    assert payload["review"]["diagnostic"]["code"] == "receipt_invalid"
+    assert not payload["publicationPlan"]["executable"]
+
+
+def test_github_maps_unique_basename_to_snapshot_path() -> None:
+    finding = Finding("high", "app.py", 1, "Handle failure", "evidence", "reproduction")
+    assert project_cli._map_github_finding_paths(snapshot(), (finding,)) == (
+        replace(finding, path="src/app.py"),
     )
+
+
+@pytest.mark.parametrize("changed_field", [0, 1, 2, None])
+def test_github_withholds_plan_when_source_changes_or_lookup_fails(
+    tmp_path: Path, monkeypatch, capsys, changed_field: int | None
+) -> None:
+    write_config(tmp_path)
+
+    class ChangedSource(FakeSource):
+        def observe_identity(self, ref):
+            if changed_field is None:
+                raise GitHubSourceError(Diagnostic("github_command_failed", "lookup unavailable"))
+            identity = list(super().observe_identity(ref))
+            identity[changed_field] = "public" if changed_field == 2 else "c" * 40
+            return tuple(identity)
+
+    monkeypatch.setattr(project_cli, "LocalGitHubSource", ChangedSource)
+    monkeypatch.setattr(project_cli, "ReviewClient", FakeClient)
+    monkeypatch.setattr(
+        project_cli,
+        "GitHubPublisher",
+        lambda *_: pytest.fail("stale or unverified identity must not reach publication"),
+    )
+
+    assert project_cli.github_review_project(github_args(tmp_path, publish=True)) != 0
+    payload = json.loads(capsys.readouterr().out)
+    assert Path(payload["review"]["formalReceipt"]).is_file()
+    assert not payload["publicationPlan"]["executable"]
+    assert payload["sourceFreshness"]["matches"] is False
+
+
+@pytest.mark.parametrize(
+    ("visibility", "privacy"),
+    [("private", "personal"), ("unknown", "personal"), ("public", "private")],
+)
+def test_github_private_source_rejects_weaker_classification_before_model(
+    tmp_path: Path, monkeypatch, capsys, visibility: str, privacy: str
+) -> None:
+    (tmp_path / "reviewctl.toml").write_text(
+        f'[project]\nvisibility = "{visibility}"\nprivacy_mode = "{privacy}"\n'
+        '[profiles.default]\nroutes = ["pi:fake/model"]\nexecution = "remote"\n'
+    )
+    monkeypatch.setattr(project_cli, "LocalGitHubSource", FakeSource)
+    monkeypatch.setattr(project_cli, "ReviewClient", FakeClient)
+    monkeypatch.setattr(FakeClient, "review", lambda *_: pytest.fail("source must not reach model"))
+
+    assert project_cli.github_review_project(github_args(tmp_path, publish=False)) == 4
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["diagnostic"]["code"] == "privacy_denied"
+    assert payload["diagnostic"]["next"]
 
 
 def test_github_review_preserves_repository_path_through_real_review_client(
@@ -890,7 +931,11 @@ def test_github_front_door_materialization_review_and_plan_errors(
     monkeypatch.setattr(project_cli, "LocalGitHubSource", FakeSource)
 
     class Client:
-        config = SimpleNamespace(project=SimpleNamespace(project_id="project-test"))
+        config = SimpleNamespace(
+            project=SimpleNamespace(
+                project_id="project-test", visibility="private", privacy_mode="private"
+            )
+        )
 
         @classmethod
         def from_project(cls, project_dir):
