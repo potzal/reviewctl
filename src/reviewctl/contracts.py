@@ -161,6 +161,11 @@ def valid_review_basename(value: object) -> bool:
     )
 
 
+def valid_review_path(value: object) -> bool:
+    """Accept a safe basename or canonical repository-relative file path."""
+    return type(value) is str and all(valid_review_basename(part) for part in value.split("/"))
+
+
 def valid_contract_context(value: object, *, require_file_names: bool = False) -> bool:
     """Validate canonical contract facts before they affect identity or semantics."""
     if type(value) is not ContractContext:
@@ -171,7 +176,7 @@ def valid_contract_context(value: object, *, require_file_names: bool = False) -
         and type(value.review_declaration_required) is bool
         and type(file_names) is tuple
         and (not require_file_names or bool(file_names))
-        and all(valid_review_basename(file_name) for file_name in file_names)
+        and all(valid_review_path(file_name) for file_name in file_names)
         and list(file_names) == sorted(set(file_names))
     )
 
@@ -380,7 +385,7 @@ def valid_finding(value: object) -> bool:
         return False
     if type(value["line"]) is not int or value["line"] < 1:
         return False
-    if not valid_review_basename(value["path"]):
+    if not valid_review_path(value["path"]):
         return False
     if not all(
         type(value[field]) is str and bool(value[field].strip())

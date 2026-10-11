@@ -228,7 +228,7 @@ def test_findings_contract_can_require_a_review_declaration_without_mutating_por
 @pytest.mark.parametrize(
     "context",
     [
-        ContractContext(file_names=("nested/source.py",)),
+        ContractContext(file_names=("../source.py",)),
         ContractContext(file_names=("source.py",), review_declaration_required=1),
         ContractContext(file_names=(chr(0xD800),)),
     ],
@@ -243,7 +243,7 @@ def test_findings_contract_prepare_rejects_malformed_context(
 @pytest.mark.parametrize(
     "context",
     [
-        ContractContext(file_names=("nested/source.py",)),
+        ContractContext(file_names=("../source.py",)),
         ContractContext(file_names=("source.py",), review_declaration_required=1),
         ContractContext(file_names=(chr(0xD800),)),
     ],

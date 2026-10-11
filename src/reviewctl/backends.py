@@ -108,6 +108,8 @@ class BackendRequest:
     source_roots: tuple[Path, ...]
     provider_preferences: dict[str, object] | None
     evidence_parent_identity: tuple[int, int] | None = None
+    cwd: Path | None = None
+    pi_bin: str | None = None
     tools: str = "none"
     thinking: str = "minimal"
     reasoning_effort: str | None = None

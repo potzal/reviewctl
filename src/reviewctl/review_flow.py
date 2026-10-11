@@ -27,6 +27,7 @@ from reviewctl.contracts import (
     valid_contract_context,
     valid_finding,
     valid_review_basename,
+    valid_review_path,
 )
 
 COMPLETION_CONTEXT_START = "<reviewctl-completion-context>"
@@ -1059,7 +1060,11 @@ def _receipt_source_file_names(receipt: dict[str, Any]) -> tuple[str, ...] | Non
         name = file.get("name")
         path = file.get("path")
         if (
-            not valid_review_basename(name)
+            not (
+                valid_review_path(name)
+                if "extension.repositoryReview" in receipt
+                else valid_review_basename(name)
+            )
             or type(path) is not str
             or not path.strip()
             or not _is_sha256(file.get("sha256"))
@@ -1246,6 +1251,10 @@ def validate_v2_receipt(receipt: object) -> tuple[str, ...]:
         return ("receipt-digest",)
     if not _receipt_extensions_have_exact_scalar_types(receipt):
         return ("receipt-digest",)
+
+    from reviewctl.repository_review import repository_receipt_violations
+
+    violations.extend(repository_receipt_violations(receipt))
 
     recorded_digest = receipt.get("sha256")
     try:

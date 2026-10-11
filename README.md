@@ -360,3 +360,41 @@ Read [the architecture and canonical vocabulary](docs/ARCHITECTURE.md),
 [tournament guide](docs/TOURNAMENT.md) before adding the tool to CI. Model
 qualification, operating rosters, provider experiments, and retained receipts
 belong to the organization's private evidence store.
+
+### Formal Pi review with repository access
+
+```bash
+reviewctl run --transport pi --model openrouter/meta/muse-spark-1.3-contributor \
+  --cwd /path/to/repository --tools read,grep,find \
+  --review-id repository-adversarial --prompt-file /path/to/request.md \
+  --response-contract findings-json --artifact-root /path/to/evidence
+reviewctl verify /path/to/evidence/REVIEW/TURN/receipt.json \
+  --cwd /path/to/repository --expect-sha FULL_HEAD_SHA
+```
+
+`--cwd` requires a clean Git worktree (including untracked files) before and
+after each attempt. `--file` is optional in this mode. The default tools are
+`read,grep,find`; `ls` is also permitted. All other tools, including shell and
+write tools, are rejected. These are Pi capability restrictions and Git change
+detection, not an operating-system sandbox. Git-ignored files remain accessible;
+use an appropriate checkout for the source you authorize Pi to inspect.
+Artifacts, logs and document output must be outside the reviewed repository.
+Tracked symlinks and submodules are currently rejected.
+
+Receipts record repository HEAD, cleanliness, allowed tools, tracked source
+hashes, observed model identity, prompt/response hashes and attempt artifact
+hashes. Findings use exact tracked paths relative to the repository root.
+`verify` validates repository receipts against retained request/response evidence;
+keep those artifacts together. `--expect-sha` additionally requires both the
+recorded and current HEAD to match, and checks cleanliness; `--cwd` overrides
+the checkout path for this live check. Without these flags, no checkout is read.
+An intact unavailable receipt remains unavailable.
+
+Use `--pi-bin omp` (or `PI_BIN=omp`) for an installed Pi-compatible executable.
+The flag overrides the environment; the default remains `pi`. The `omp`
+invocation uses its native rule/LSP/PTY/title/prewalk disabling flags instead
+of Pi-only flags. Pi/omp resolves
+OpenRouter model IDs such as `meta/muse-spark-1.3-contributor`; the receipt retains
+the observed `openrouter/meta/muse-spark-1.3-contributor` identity. Only the exact
+requested model, optionally qualified by the observed OpenRouter provider, is
+accepted. Without `--cwd`, formal Pi runs retain their existing no-tools behavior.
