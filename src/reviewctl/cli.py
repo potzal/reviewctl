@@ -89,6 +89,13 @@ from reviewctl.range_review import (
     validate_range_manifest,
     verify_range_aggregate,
 )
+from reviewctl.repository_review import (
+    DEFAULT_TOOLS,
+    read_only_tools,
+    repository_evidence_violations,
+    repository_sources,
+    repository_state,
+)
 from reviewctl.review_flow import (
     FallbackRelationship,
     PromotedFragment,
@@ -500,6 +507,9 @@ def utc_now() -> str:
 def redact_diagnostic(value: str, *, limit: int = 4000) -> str:
     """Keep provider diagnostics useful without persisting credentials or huge bodies."""
     text = value.replace("\x00", "")
+    for name, secret in os.environ.items():
+        if secret and (name.endswith("_API_KEY") or name.endswith("_TOKEN")):
+            text = text.replace(secret, "[REDACTED_CREDENTIAL]")
     patterns = (
         (r"(?i)(authorization\s*:\s*bearer\s+)[^\s]+", r"\1[REDACTED]"),
         (r"(?i)(bearer\s+)[^\s]+", r"\1[REDACTED]"),
@@ -1073,7 +1083,11 @@ def validate_request(
         and not getattr(args, "profile", None)
     ):
         fail(parser, "at least one --model, --route, or --profile is required")
-    if len(args.files) == 0 and getattr(args, "source_class", "proprietary") == "proprietary":
+    if (
+        len(args.files) == 0
+        and not getattr(args, "cwd", None)
+        and getattr(args, "source_class", "proprietary") == "proprietary"
+    ):
         fail(parser, "at least one --file is required")
     if len(args.files) > MAX_FILES:
         fail(parser, f"at most {MAX_FILES} review files are allowed")
@@ -3593,23 +3607,29 @@ def invoke_pi(
     diagnostic_path: Path,
     evidence_parent_identity: tuple[int, int] | None = None,
     thinking: str = "minimal",
+    cwd: Path | None = None,
+    tools: str = "none",
     prepared_contract: PreparedContract | None = None,
 ) -> tuple[int, str, PersistedResponse]:
     """Run Pi in JSON mode and retain its complete event stream and session."""
     blank = PersistedResponse("", None, None, None, "", None, None, "")
     if resource is None:
         return 126, "Pi bounded output capture unsupported on this platform", blank
+    omp = Path(pi_bin).name == "omp"
+    isolation_flags = (
+        ["--no-rules", "--no-lsp", "--no-pty", "--no-title", "--no-prewalk"]
+        if omp
+        else ["--no-prompt-templates", "--no-context-files", "--no-approve"]
+    )
     command = [
         pi_bin,
         "--mode",
         "json",
         "--print",
-        "--no-tools",
+        *(["--tools", tools] if cwd else ["--no-tools"]),
         "--no-extensions",
         "--no-skills",
-        "--no-prompt-templates",
-        "--no-context-files",
-        "--no-approve",
+        *isolation_flags,
         "--thinking",
         thinking,
         "--system-prompt",
@@ -3619,16 +3639,28 @@ def invoke_pi(
         "--session",
         str(session_path),
     ]
+    if cwd:
+        command[command.index("--system-prompt") + 1] = (
+            "Review the repository using only the allowed read-only tools. "
+            + pi_system_prompt(response_contract, prepared_contract=prepared_contract).replace(
+                "Read only the supplied files.", "Read repository files as needed."
+            )
+        )
     command.extend(f"@{file}" for file in files)
     command.append(
         f"{prompt}\n\nReturn only the requested {response_contract} response. "
-        "Do not edit files, run commands, or use information outside the supplied files."
+        + (
+            "Do not edit files or run shell commands. Inspect the repository with read-only tools."
+            if cwd
+            else "Do not edit files, run commands, or use information outside the supplied files."
+        )
     )
     write_private_exclusive(
         request_path,
         canonical_json(
             {
-                "command": "pi",
+                "command": pi_bin,
+                **({"cwd": str(cwd), "tools": tools.split(",")} if cwd else {}),
                 "mode": "json",
                 "model": model,
                 "requestedMaxOutputTokens": max_output_tokens,
@@ -3666,7 +3698,7 @@ def invoke_pi(
         with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
             process = subprocess.Popen(
                 command,
-                cwd=files[0].parent if files else None,
+                cwd=cwd or (files[0].parent if files else None),
                 stdout=stdout_file,
                 stderr=stderr_file,
                 start_new_session=True,
@@ -3718,7 +3750,7 @@ def invoke_pi(
                 )
             return (
                 124,
-                pi_timeout_diagnostic(stderr),
+                redact_diagnostic(pi_timeout_diagnostic(stderr)),
                 pi_persisted_response(
                     stdout,
                     model,
@@ -3727,11 +3759,11 @@ def invoke_pi(
                 ),
             )
     except FileNotFoundError:
-        return 127, f"Pi transport executable not found: {pi_bin}", blank
+        return 127, redact_diagnostic(f"Pi transport executable not found: {pi_bin}"), blank
     except subprocess.SubprocessError as error:
-        return 126, f"Pi bounded output capture failed: {error}", blank
+        return 126, redact_diagnostic(f"Pi bounded output capture failed: {error}"), blank
     except OSError as error:
-        return 127, f"Pi transport could not execute: {error}", blank
+        return 127, redact_diagnostic(f"Pi transport could not execute: {error}"), blank
 
     if stdout:
         write_private_exclusive(
@@ -3751,12 +3783,12 @@ def invoke_pi(
     if not persisted.response:
         return (
             process.returncode,
-            stderr.decode(errors="replace"),
+            redact_diagnostic(stderr.decode(errors="replace")),
             persisted,
         )
     return (
         process.returncode,
-        stderr.decode(errors="replace"),
+        redact_diagnostic(stderr.decode(errors="replace")),
         PersistedResponse(
             conversation_id=persisted.conversation_id,
             cost_usd=persisted.cost_usd,
@@ -4750,7 +4782,8 @@ def execute_pi_backend(request: BackendRequest) -> BackendExecution:
     with tempfile.TemporaryDirectory(prefix="reviewctl-pi-") as scratch_directory:
         scratch_session = Path(scratch_directory).resolve() / "session.jsonl"
         exit_code, diagnostic, response = invoke_pi(
-            pi_bin=os.environ.get("PI_BIN", "pi"),
+            pi_bin=request.pi_bin or os.environ.get("PI_BIN", "pi"),
+            **({"cwd": request.cwd, "tools": request.tools} if request.cwd else {}),
             prompt=request.prompt,
             model=request.model,
             files=list(request.files),
@@ -5318,6 +5351,21 @@ def seal(
 
 def run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     prompt, files = validate_request(parser, args)
+    repository = None
+    cwd_value = getattr(args, "cwd", None)
+    cwd = Path(cwd_value).expanduser().resolve() if cwd_value else None
+    tools_value = getattr(args, "tools", None)
+    try:
+        tools = read_only_tools(tools_value if tools_value is not None else DEFAULT_TOOLS)
+        if tools_value is not None and cwd is None:
+            raise ValueError("--tools requires --cwd")
+        if cwd is not None:
+            repository = repository_state(cwd)
+            if not repository["clean"]:
+                raise ValueError("--cwd must have a clean Git tree")
+            repository["tools"] = tools
+    except (OSError, ValueError) as error:
+        parser.error(redact_diagnostic(str(error)))
     range_context: dict[str, Any] | None = None
     range_context_path = getattr(args, "range_context_file", None)
     if range_context_path:
@@ -5348,6 +5396,8 @@ def run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
             "Kiro transport currently supports only --response-contract findings-json; "
             "terminal-rendered document and verdict output cannot be verified without rewriting"
         )
+    if (cwd or getattr(args, "pi_bin", None)) and any(route.transport != "pi" for route in routes):
+        parser.error("--cwd and --pi-bin require only pi routes")
     route_transports = {route.transport for route in routes}
     transport_default_key = next(iter(route_transports)) if len(route_transports) == 1 else ""
     if route_profile:
@@ -5361,7 +5411,12 @@ def run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
         transport_defaults, execution_config = load_transport_defaults(
             parser, getattr(args, "config", None), transport_default_key
         )
-    review_prompt = packet_prompt(prompt, files, args.response_contract)
+    review_prompt = (
+        prompt + "\n\nInspect the repository. Finding paths must be exact tracked paths relative "
+        "to the repository root. Do not edit files or run shell commands."
+        if cwd
+        else packet_prompt(prompt, files, args.response_contract)
+    )
     packet_digest = sha256_bytes(review_prompt.encode())
     try:
         provider_preferences = provider_preferences_from_args(args)
@@ -5410,6 +5465,13 @@ def run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
         if getattr(args, "log_file", None)
         else artifact_root / "reviewctl.log"
     )
+    if repository is not None:
+        root = Path(str(repository["repositoryRoot"]))
+        destinations = [artifact_root, log_path]
+        if getattr(args, "output_file", None):
+            destinations.append(Path(args.output_file))
+        if any(path.expanduser().resolve().is_relative_to(root) for path in destinations):
+            parser.error("repository review artifacts, logs and output must be outside --cwd")
     logger = configure_runtime_logger(log_path)
     turn_dir, turn_identity = review_root(artifact_root, args.review_id)
     attempts_dir = turn_dir / "attempts"
@@ -5430,6 +5492,11 @@ def run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
     )
     snapshots_context = frozen_review_files(files)
     source_files, snapshots = snapshots_context.__enter__()
+    if repository is not None:
+        try:
+            source_files = repository_sources(repository)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            parser.error(redact_diagnostic(str(error)))
     if not source_files:
         prompt_source: dict[str, str] = {
             "name": Path(args.prompt_file).name if args.prompt_file else "prompt.txt",
@@ -5453,7 +5520,15 @@ def run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
     )
     source = {
         "files": source_files,
-        "git": source_git_metadata(files),
+        "git": (
+            {
+                "head": repository["head"],
+                "remote": None,
+                "repositoryRoot": repository["repositoryRoot"],
+            }
+            if repository
+            else source_git_metadata(files)
+        ),
     }
     attempts: list[dict[str, Any]] = []
     accepted: PersistedResponse | None = None
@@ -5673,11 +5748,25 @@ def run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
                     source_roots=tuple(codex_source_roots or ()),
                     provider_preferences=provider_preferences,
                     evidence_parent_identity=attempt_identity,
+                    cwd=cwd,
+                    tools=",".join(tools) if cwd else "none",
+                    pi_bin=getattr(args, "pi_bin", None),
                     thinking=thinking,
                     reasoning_effort=reasoning_effort if transport == "openrouter" else None,
                     prepared_contract=prepared_contract,
                 )
             )
+            if repository is not None:
+                try:
+                    current_state = repository_state(cwd)
+                    if current_state != {
+                        key: value for key, value in repository.items() if key != "tools"
+                    }:
+                        raise ValueError("repository changed during review")
+                except OSError, ValueError:
+                    execution = BackendExecution(
+                        126, "repository changed during review", None, execution.evidence
+                    )
             exit_code = execution.exit_code
             stderr = execution.diagnostic
             persisted = execution.response
@@ -5711,7 +5800,14 @@ def run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
                 gate_result = "transport-failed"
             elif persisted is None:
                 gate_result = "missing-response"
-            elif capabilities.resolved_model_identity and persisted.model != transport_model:
+            elif capabilities.resolved_model_identity and not (
+                persisted.model == transport_model
+                or (
+                    transport == "pi"
+                    and persisted.provider == "openrouter"
+                    and persisted.model == f"openrouter/{transport_model}"
+                )
+            ):
                 gate_result = "model-mismatch"
             elif capabilities.resolved_provider_identity and not resolved_provider_matches(
                 provider_preferences, persisted.provider
@@ -5939,6 +6035,12 @@ def run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
                         else None
                     ),
                 }
+            if repository is not None:
+                attempt["extension.repositoryEvidence"] = {
+                    key: {"path": value, "sha256": sha256_bytes(read_confined_bytes(Path(value)))}
+                    for key, value in attempt["evidence"].items()
+                    if value is not None
+                }
             if evaluation_error is not None:
                 attempt["evaluationError"] = evaluation_error
             attempts.append(attempt)
@@ -6032,6 +6134,13 @@ def run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
             "rotation": {"maxBytes": 5 * 1024 * 1024, "backupCount": 5},
         },
     }
+    if repository is not None:
+        receipt["extension.repositoryReview"] = repository
+        prompt_path = turn_dir / "repository-prompt.txt"
+        write_private_exclusive(
+            prompt_path, prompt.encode(), expected_parent_identity=turn_identity
+        )
+        receipt["extension.repositoryPrompt"] = {"path": str(prompt_path)}
     if effective_reviewed_files:
         receipt["executionSettings"]["requireReviewedFiles"] = True
     if kiro_identity_waiver:
@@ -6309,7 +6418,30 @@ def receipt_bytes_violations(contents: bytes) -> tuple[str, ...]:
 def verify_receipt(args: argparse.Namespace) -> int:
     receipt_path = Path(args.receipt)
     try:
-        violations = receipt_bytes_violations(read_confined_bytes(receipt_path))
+        raw = read_confined_bytes(receipt_path)
+        violations = receipt_bytes_violations(raw)
+        if not violations:
+            receipt = json.loads(raw)
+            if "extension.repositoryReview" in receipt:
+                violations = repository_evidence_violations(receipt)
+        expect_sha = getattr(args, "expect_sha", None)
+        verify_cwd = getattr(args, "cwd", None)
+        if not violations and (expect_sha or verify_cwd):
+            receipt = json.loads(raw)
+            context = receipt.get("extension.repositoryReview")
+            if not context:
+                violations = ("repository-review-required",)
+            elif expect_sha and context["head"] != expect_sha:
+                violations = ("repository-sha",)
+            else:
+                try:
+                    state = repository_state(
+                        Path(verify_cwd or context["cwd"]).expanduser().resolve()
+                    )
+                    if state["head"] != context["head"] or not state["clean"]:
+                        violations = ("repository-state",)
+                except OSError, ValueError:
+                    violations = ("repository-state",)
     except OSError:
         violations = ("json-receipt",)
     valid = not violations
@@ -6947,6 +7079,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="TOML route config (default: ~/.config/reviewctl/config.toml)",
     )
     run.add_argument("--file", dest="files", action="append", default=[])
+    run.add_argument("--cwd", help="clean Git worktree for read-only Pi review")
+    run.add_argument("--tools", help="Pi read-only tools (default with --cwd: read,grep,find)")
+    run.add_argument("--pi-bin", help="Pi-compatible binary, e.g. omp (default: PI_BIN or pi)")
     run.add_argument("--artifact-root", default="~/.cache/reviewctl")
     run.add_argument(
         "--log-file",
@@ -7168,6 +7303,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify = commands.add_parser("verify", help="verify a receipt hash")
     verify.add_argument("receipt")
+    verify.add_argument("--cwd", help="check current repository HEAD and cleanliness")
+    verify.add_argument("--expect-sha", help="require the declared and current repository HEAD")
     verify.set_defaults(handler=verify_receipt)
 
     policy = commands.add_parser("policy-check", help="check a model privacy profile")
