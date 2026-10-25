@@ -426,6 +426,14 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+class _ExplicitOutputLimit(argparse.Action):
+    """Keep the parser's legacy integer default while recording CLI intent."""
+
+    def __call__(self, parser, namespace, values, option_string=None) -> None:
+        setattr(namespace, self.dest, values)
+        namespace._explicit_output_limit = True
+
+
 def positive_integer(value: str) -> int:
     """Parse a CLI integer that must be strictly positive."""
     try:
@@ -601,6 +609,7 @@ def execution_default_settings(
     for key, minimum, maximum in (
         ("timeout_seconds", 1, None),
         ("max_attempts", 1, 3),
+        ("max_output_tokens", 1, None),
     ):
         value = transport_defaults.get(key)
         if value is None:
@@ -639,6 +648,7 @@ def load_route_profile(
     for key, minimum, maximum in (
         ("timeout_seconds", 1, None),
         ("max_attempts", 1, 3),
+        ("max_output_tokens", 1, None),
     ):
         value = profile_config.get(key) if isinstance(profile_config, dict) else None
         if value is None:
@@ -5411,6 +5421,16 @@ def run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
         transport_defaults, execution_config = load_transport_defaults(
             parser, getattr(args, "config", None), transport_default_key
         )
+    profile_settings = route_profile.get("settings", {}) if route_profile else {}
+    configured_output_limit = (
+        profile_settings.get("max_output_tokens") if isinstance(profile_settings, dict) else None
+    )
+    if configured_output_limit is None:
+        configured_output_limit = transport_defaults.get("max_output_tokens")
+    if not getattr(args, "_explicit_output_limit", True):
+        args.max_output_tokens = configured_output_limit or DEFAULT_MAX_OUTPUT_TOKENS
+    if type(args.max_output_tokens) is not int or args.max_output_tokens <= 0:
+        parser.error("max output tokens must be a positive integer")
     review_prompt = (
         prompt + "\n\nInspect the repository. Finding paths must be exact tracked paths relative "
         "to the repository root. Do not edit files or run shell commands."
@@ -5543,7 +5563,6 @@ def run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
     previous_gate_result: str | None = None
     consolidation_context: ContractContext | None = None
 
-    profile_settings = route_profile.get("settings", {}) if route_profile else {}
     configured_timeout = (
         profile_settings.get("timeout_seconds")
         if isinstance(profile_settings, dict)
@@ -6289,9 +6308,9 @@ def run_transport_canary(parser: argparse.ArgumentParser, args: argparse.Namespa
             "--require-reviewed-files",
             "--max-attempts",
             "1",
-            "--max-output-tokens",
-            str(args.max_output_tokens),
         ]
+        if getattr(args, "_explicit_output_limit", True):
+            review_arguments.extend(("--max-output-tokens", str(args.max_output_tokens)))
         if args.timeout_seconds is not None:
             review_arguments.extend(("--timeout-seconds", str(args.timeout_seconds)))
         review_args = parser.parse_args(review_arguments)
@@ -7096,7 +7115,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="internal immutable range identity to embed in the v2 receipt",
     )
     run.add_argument("--timeout-seconds", type=positive_timeout_seconds, default=None)
-    run.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS)
+    run.add_argument(
+        "--max-output-tokens",
+        type=positive_integer,
+        action=_ExplicitOutputLimit,
+        default=DEFAULT_MAX_OUTPUT_TOKENS,
+    )
     run.add_argument(
         "--reasoning-effort",
         choices=sorted(OPENROUTER_REASONING_EFFORTS),
@@ -7135,7 +7159,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("llm", "codex", "openrouter", "agy", "gemini", "kiro", "pi"),
         default="llm",
     )
-    run.set_defaults(handler=lambda namespace: run_review(parser, namespace))
+    run.set_defaults(
+        handler=lambda namespace: run_review(parser, namespace), _explicit_output_limit=False
+    )
 
     transport_canary = commands.add_parser(
         "transport-canary",
@@ -7149,9 +7175,15 @@ def build_parser() -> argparse.ArgumentParser:
     transport_canary.add_argument("--artifact-root", default="~/.cache/reviewctl/canaries")
     transport_canary.add_argument("--timeout-seconds", type=positive_timeout_seconds)
     transport_canary.add_argument(
-        "--max-output-tokens", type=positive_integer, default=DEFAULT_MAX_OUTPUT_TOKENS
+        "--max-output-tokens",
+        type=positive_integer,
+        action=_ExplicitOutputLimit,
+        default=DEFAULT_MAX_OUTPUT_TOKENS,
     )
-    transport_canary.set_defaults(handler=lambda namespace: run_transport_canary(parser, namespace))
+    transport_canary.set_defaults(
+        handler=lambda namespace: run_transport_canary(parser, namespace),
+        _explicit_output_limit=False,
+    )
 
     range_review = commands.add_parser(
         "range-review",

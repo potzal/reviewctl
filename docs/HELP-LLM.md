@@ -35,6 +35,16 @@ blindly.
 two routes and `max_attempts = 2` can therefore make at most four bounded
 attempts; each attempt and transition is recorded in the receipt.
 
+For legacy `run` and `transport-canary`, `max_output_tokens` is a positive
+integer request setting. Precedence is explicit `--max-output-tokens`, then
+`profiles.NAME.max_output_tokens`, then `defaults.TRANSPORT.max_output_tokens`,
+then the built-in default. An invalid configured limit fails before execution;
+fix the indicated config field rather than retrying or changing providers.
+The profile's configured value remains in receipt metadata even when the CLI
+overrides it. Forwarding a request limit is not proof the backend enforces it:
+inspect the transport's output-limit capability and request evidence. Pi still
+reports that reviewctl does not enforce a portable output-token cap.
+
 Pi-backed profiles accept `thinking = "off"`, `"minimal"`, `"low"`, `"medium"`,
 `"high"`, `"xhigh"`, or `"max"`. The value is forwarded to Pi and recorded in
 request evidence. It controls reasoning effort and does not enforce an output

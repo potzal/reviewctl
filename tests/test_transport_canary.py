@@ -112,11 +112,27 @@ def test_transport_canary_runs_a_profile_and_writes_report(
     )
 
 
+@pytest.mark.parametrize("profile_limit", [None, 8192])
+@pytest.mark.parametrize("default_limit", [None, 4096])
+@pytest.mark.parametrize("explicit_limit", [None, 512, cli.DEFAULT_MAX_OUTPUT_TOKENS])
 def test_transport_canary_propagates_reviewed_file_requirement_to_backend(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    profile_limit: int | None,
+    default_limit: int | None,
+    explicit_limit: int | None,
 ) -> None:
     config = tmp_path / "config.toml"
-    config.write_text('[profiles.codex]\nroutes = ["codex:canary"]\n')
+    config.write_text(
+        '[profiles.codex]\nroutes = ["codex:canary"]\n'
+        + (f"max_output_tokens = {profile_limit}\n" if profile_limit is not None else "")
+        + (
+            f"[defaults.codex]\nmax_output_tokens = {default_limit}\n"
+            if default_limit is not None
+            else ""
+        )
+    )
     registry = cli.BackendRegistry()
     descriptor = cli.build_backend_registry().require("codex").descriptor
     captured: list[cli.BackendRequest] = []
@@ -147,21 +163,27 @@ def test_transport_canary_propagates_reviewed_file_requirement_to_backend(
 
     registry.register(descriptor, execute)
     monkeypatch.setattr(cli, "build_backend_registry", lambda: registry)
-    namespace = cli.build_parser().parse_args(
-        [
-            "transport-canary",
-            "--profile",
-            "codex",
-            "--config",
-            str(config),
-            "--artifact-root",
-            str(tmp_path / "artifacts"),
-        ]
-    )
+    arguments = [
+        "transport-canary",
+        "--profile",
+        "codex",
+        "--config",
+        str(config),
+        "--artifact-root",
+        str(tmp_path / "artifacts"),
+    ]
+    if explicit_limit is not None:
+        arguments.extend(("--max-output-tokens", str(explicit_limit)))
+    namespace = cli.build_parser().parse_args(arguments)
 
     assert namespace.handler(namespace) == 0
     assert captured[0].prepared_contract is not None
     assert captured[0].prepared_contract.review_declaration_required is True
+    assert captured[0].max_output_tokens == (
+        explicit_limit
+        if explicit_limit is not None
+        else profile_limit or default_limit or cli.DEFAULT_MAX_OUTPUT_TOKENS
+    )
     report_path = Path(capsys.readouterr().out.splitlines()[-1])
     assert json.loads(report_path.read_text())["result"] == "accepted"
 
