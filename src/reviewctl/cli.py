@@ -120,6 +120,11 @@ MAX_AGY_STDOUT_BYTES = 4 * 1024 * 1024
 MAX_AGY_STDERR_BYTES = 100_000
 MAX_KIRO_STDOUT_BYTES = 4 * 1024 * 1024
 MAX_KIRO_STDERR_BYTES = 100_000
+# The JSONL stream repeats the packet in its input events and carries every delta.
+MAX_MUSE_STDOUT_BYTES = 32 * 1024 * 1024
+MAX_MUSE_STDERR_BYTES = 100_000
+MUSE_DEFAULT_REASONING_EFFORT = "high"
+MUSE_REFUSED_TOOL_PREFIX = "tool unavailable:"
 MAX_LLM_DATABASE_BYTES = 4 * 1024 * 1024
 MAX_LLM_STDOUT_BYTES = 4 * 1024 * 1024
 MAX_LLM_STDERR_BYTES = 100_000
@@ -162,11 +167,12 @@ DEFAULT_REVIEW_TIMEOUT_SECONDS = 90
 DEFAULT_REVIEW_MAX_ATTEMPTS = 1
 TOURNAMENT_TRANSPORTS = {"llm", "codex", "openrouter", "agy", "kiro", "pi"}
 TOURNAMENT_COST_MODES = {"metered", "account-included", "subscription"}
-ROUTE_TRANSPORTS = {"llm", "codex", "openrouter", "agy", "gemini", "kiro", "pi"}
+ROUTE_TRANSPORTS = {"llm", "codex", "openrouter", "agy", "gemini", "kiro", "muse", "pi"}
 PI_THINKING_LEVELS = THINKING_LEVELS
 OPENROUTER_REASONING_EFFORTS = frozenset({"low", "medium", "high"})
-LOCAL_POLICY_TRANSPORTS = frozenset({"codex", "gemini", "kiro", "pi"})
-REQUIRED_LOCAL_POLICY_TRANSPORTS = frozenset({"gemini", "kiro", "pi"})
+REASONING_EFFORT_TRANSPORTS = frozenset({"muse", "openrouter"})
+LOCAL_POLICY_TRANSPORTS = frozenset({"codex", "gemini", "kiro", "muse", "pi"})
+REQUIRED_LOCAL_POLICY_TRANSPORTS = frozenset({"gemini", "kiro", "muse", "pi"})
 RETRIABLE_REVIEW_RESULTS = {
     "timeout",
     "transport-failed",
@@ -565,7 +571,7 @@ def parse_route(value: str) -> ReviewRoute:
     if not separator or transport not in ROUTE_TRANSPORTS or not model.strip():
         raise ValueError(
             "routes must use transport:model with transport in "
-            "llm, codex, openrouter, agy, gemini, kiro, pi"
+            "llm, codex, openrouter, agy, gemini, kiro, muse, pi"
         )
     return ReviewRoute(transport=transport, model=model.strip())
 
@@ -3083,6 +3089,324 @@ def invoke_gemini(
     )
 
 
+def muse_process_environment(source: Mapping[str, str]) -> dict[str, str]:
+    """Retain the Muse Code login while excluding unrelated credentials."""
+    allowed = (
+        "PATH",
+        "SYSTEMROOT",
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+        "MUSE_AUTH_PATH",
+    )
+    environment = {key: source[key] for key in allowed if key in source}
+    environment["MUSE_NO_AUTO_UPDATE"] = "1"
+    environment["NO_COLOR"] = "1"
+    environment["CLICOLOR"] = "0"
+    environment["TERM"] = "dumb"
+    return environment
+
+
+@dataclass(frozen=True)
+class MuseRun:
+    """The facts a Muse event stream proved about one completed run."""
+
+    session_id: str
+    provider: str
+    response: str
+    observed_models: tuple[dict[str, object], ...]
+
+
+def muse_billed_models(payload: object, model: str) -> tuple[dict[str, object], ...]:
+    """Require a usage event to name the billed model on every entry."""
+    entries = payload.get("models") if isinstance(payload, dict) else None
+    if (
+        not isinstance(entries, list)
+        or not entries
+        or not all(
+            isinstance(entry, dict) and isinstance(entry.get("model"), str) for entry in entries
+        )
+    ):
+        raise ValueError("Muse returned malformed usage evidence")
+    for entry in entries:
+        if entry["model"] != model:
+            raise ValueError(f"Muse ran a different model: {entry['model']}")
+    return tuple(
+        {key: entry.get(key) for key in ("input_tokens", "model", "output_tokens")}
+        for entry in entries
+    )
+
+
+def parse_muse_events(stdout: bytes, model: str) -> MuseRun:
+    """Keep only the terminal answer, rejecting any stream that broke the review's limits."""
+    events: list[object] = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            events.append(
+                json.loads(
+                    line,
+                    object_pairs_hook=exact_json_object,
+                    parse_constant=reject_nonstandard_json_constant,
+                    parse_float=parse_finite_json_float,
+                )
+            )
+        except ValueError as error:
+            raise ValueError("Muse returned invalid JSONL") from error
+    terminals: list[dict[str, Any]] = []
+    configured_model: str | None = None
+    provider: object = None
+    observed_models: tuple[dict[str, object], ...] = ()
+    for event in events:
+        if not isinstance(event, dict):
+            raise ValueError("Muse returned a non-object event")
+        payload_type = str(event.get("payload_type"))
+        payload = event.get("payload")
+        if payload_type == "tool.result":
+            # `--preset empty` answers a hallucinated call with this refusal; any
+            # other result means a tool ran and the packet is no longer the only input.
+            text = payload.get("text") if isinstance(payload, dict) else None
+            if not isinstance(text, str) or not text.startswith(MUSE_REFUSED_TOOL_PREFIX):
+                raise ValueError("Muse reported a tool execution in a tool-free review")
+        elif payload_type == "run.model.configured" and isinstance(payload, dict):
+            model_id = payload.get("model_id")
+            if isinstance(model_id, str):
+                if model_id != model:
+                    raise ValueError(f"Muse ran a different model: {model_id}")
+                configured_model = model_id
+                provider = payload.get("provider_id")
+        elif payload_type == "run.usage":
+            observed_models = muse_billed_models(payload, model)
+        elif payload_type.startswith("run.terminal."):
+            terminals.append(event)
+    if not terminals:
+        raise ValueError("Muse returned no terminal event")
+    if len(terminals) > 1:
+        raise ValueError("Muse returned multiple terminal events")
+    terminal = terminals[0]
+    payload = terminal.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("Muse returned a malformed terminal event")
+    if terminal.get("payload_type") != "run.terminal.completed" or (
+        payload.get("terminal") != "completed"
+    ):
+        raise ValueError("Muse run did not complete")
+    response = payload.get("text")
+    if not isinstance(response, str):
+        raise ValueError("Muse returned no response")
+    if configured_model is None:
+        raise ValueError("Muse returned no model identity")
+    if not isinstance(provider, str) or not provider.strip():
+        raise ValueError("Muse returned no provider identity")
+    stream = terminal.get("stream")
+    session_id = stream.get("id") if isinstance(stream, dict) else None
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ValueError("Muse returned no session identifier")
+    if not observed_models:
+        raise ValueError("Muse returned no billed model evidence")
+    return MuseRun(session_id, provider, response, observed_models)
+
+
+def muse_usage(observed_models: tuple[dict[str, object], ...]) -> tuple[int | None, int | None]:
+    """Sum per-model counters while keeping unreported totals distinct from zero."""
+
+    def total(key: str) -> int | None:
+        values = [token_value(entry[key]) for entry in observed_models]
+        reported = [value for value in values if value is not None]
+        return sum(reported) if reported else None
+
+    return total("input_tokens"), total("output_tokens")
+
+
+def invoke_muse(
+    *,
+    muse_bin: str,
+    prompt: str,
+    model: str,
+    files: list[Path],
+    max_output_tokens: int,
+    response_contract: str,
+    timeout_seconds: int,
+    request_path: Path,
+    response_path: Path,
+    session_path: Path,
+    diagnostic_path: Path,
+    reasoning_effort: str | None = None,
+    evidence_parent_identity: tuple[int, int] | None = None,
+    prepared_contract: PreparedContract | None = None,
+) -> tuple[int, str, PersistedResponse]:
+    """Run `muse exec` with no tools from an empty workspace and durable JSONL evidence."""
+    blank = PersistedResponse("", None, None, None, "", None, None, "")
+    if model.startswith("-"):
+        return 502, f"Muse model id must not start with '-': {model}", blank
+    effort = reasoning_effort or MUSE_DEFAULT_REASONING_EFFORT
+    packet = openrouter_packet(
+        prompt,
+        files,
+        response_contract,
+        prepared_contract=prepared_contract,
+    )
+    started = time.monotonic()
+
+    def persist(stdout: bytes, stderr: bytes) -> str:
+        if stdout:
+            write_private_exclusive(
+                response_path,
+                stdout,
+                expected_parent_identity=evidence_parent_identity,
+            )
+        diagnostic = redact_diagnostic(stderr.decode(errors="replace"), limit=100_000)
+        if diagnostic:
+            write_private_exclusive(
+                diagnostic_path,
+                diagnostic.encode(),
+                expected_parent_identity=evidence_parent_identity,
+            )
+        return diagnostic
+
+    with tempfile.TemporaryDirectory(prefix="reviewctl-muse-") as directory:
+        root = Path(directory).resolve()
+        workspace = root / "workspace"
+        workspace.mkdir(mode=0o700)
+        prompt_path = root / "packet.md"
+        write_private_exclusive(prompt_path, packet.encode())
+        # `--disable-write --disable-shell` alone still leaves read_file, which reads
+        # outside the workspace; `--preset empty` is what removes every session tool.
+        command = [
+            muse_bin,
+            "exec",
+            "--json",
+            "--prompt-file",
+            str(prompt_path),
+            "--model",
+            model,
+            "--reasoning-effort",
+            effort,
+            "--preset",
+            "empty",
+            "--disable-write",
+            "--disable-shell",
+            "--disable-web-tools",
+            "--disable-reminders",
+            "--disable-request-user-input",
+            "--no-foreign-personal-context",
+            "--no-session-log",
+            "--approval-mode",
+            "untrusted",
+            "--approval-judge",
+            "off",
+            "--max-model-steps",
+            "4",
+            "--workspace",
+            str(workspace),
+        ]
+        write_private_exclusive(
+            request_path,
+            canonical_json(
+                {
+                    "command": command,
+                    "model": model,
+                    "reasoningEffort": effort,
+                    "preset": "empty",
+                    "maxOutputTokens": max_output_tokens,
+                    "outputTokenLimitEnforced": False,
+                    "responseContract": response_contract,
+                    "files": [str(file) for file in files],
+                    "prompt": packet,
+                    "session": str(session_path),
+                }
+            )
+            + b"\n",
+            label="Muse request evidence",
+            expected_parent_identity=evidence_parent_identity,
+        )
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=workspace,
+                env=muse_process_environment(os.environ),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            (
+                stdout,
+                stderr,
+                timed_out,
+                output_exceeded,
+                capture_incomplete,
+            ) = _communicate_kiro_bounded(
+                process,
+                input_bytes=None,
+                timeout_seconds=timeout_seconds,
+                stdout_limit=MAX_MUSE_STDOUT_BYTES,
+                stderr_limit=MAX_MUSE_STDERR_BYTES,
+            )
+        except FileNotFoundError:
+            return 127, f"Muse transport executable not found: {muse_bin}", blank
+        except subprocess.SubprocessError as error:
+            return 126, f"Muse bounded output capture failed: {error}", blank
+        except OSError as error:
+            return 127, f"Muse transport could not execute: {error}", blank
+
+    diagnostic = persist(stdout, stderr)
+    if output_exceeded:
+        return 502, "Muse transport output exceeded bounded capture", blank
+    if timed_out:
+        return 124, "review attempt timed out", blank
+    if capture_incomplete:
+        return 502, "Muse transport capture did not reach EOF", blank
+    if process.returncode != 0:
+        return process.returncode, diagnostic, blank
+    try:
+        run = parse_muse_events(stdout, model)
+    except ValueError as error:
+        return 502, str(error), blank
+    write_private_exclusive(
+        session_path,
+        canonical_json(
+            {
+                "modelId": model,
+                "observedModels": list(run.observed_models),
+                "providerId": run.provider,
+                "sessionId": run.session_id,
+            }
+        )
+        + b"\n",
+        label="Muse session evidence",
+        expected_parent_identity=evidence_parent_identity,
+    )
+    input_tokens, output_tokens = muse_usage(run.observed_models)
+    return (
+        0,
+        diagnostic,
+        PersistedResponse(
+            conversation_id=run.session_id,
+            cost_usd=None,
+            duration_ms=round((time.monotonic() - started) * 1000),
+            input_tokens=input_tokens,
+            model=model,
+            output_tokens=output_tokens,
+            provider=run.provider,
+            response=normalize_pi_response(run.response, response_contract),
+        ),
+    )
+
+
 def positive_timeout_seconds(value: str) -> int:
     """Parse a CLI timeout that preserves the same deadline across transports."""
     try:
@@ -4742,6 +5066,48 @@ def execute_agy_backend(request: BackendRequest) -> BackendExecution:
     )
 
 
+def execute_muse_backend(request: BackendRequest) -> BackendExecution:
+    request_path = request.attempt_dir / "request.json"
+    response_path = request.attempt_dir / "response.jsonl"
+    session_path = request.attempt_dir / "session.json"
+    final_response_path = request.attempt_dir / "response.md"
+    diagnostic_path = request.attempt_dir / "stderr.log"
+    exit_code, diagnostic, response = invoke_muse(
+        muse_bin=os.environ.get("MUSE_BIN", "muse"),
+        prompt=request.prompt,
+        model=request.model,
+        files=list(request.files),
+        max_output_tokens=request.max_output_tokens,
+        response_contract=request.response_contract,
+        timeout_seconds=request.timeout_seconds,
+        request_path=request_path,
+        response_path=response_path,
+        session_path=session_path,
+        diagnostic_path=diagnostic_path,
+        reasoning_effort=request.reasoning_effort,
+        evidence_parent_identity=request.evidence_parent_identity,
+        prepared_contract=request.prepared_contract,
+    )
+    if response.response:
+        write_private_exclusive(
+            final_response_path,
+            response.response.encode(),
+            expected_parent_identity=request.evidence_parent_identity,
+        )
+    return BackendExecution(
+        exit_code,
+        diagnostic,
+        response,
+        BackendEvidence(
+            request=request_path,
+            response=response_path,
+            session=session_path,
+            final_response=final_response_path if response.response else None,
+            stderr=diagnostic_path,
+        ),
+    )
+
+
 def execute_gemini_backend(request: BackendRequest) -> BackendExecution:
     request_path = request.attempt_dir / "request.json"
     response_path = request.attempt_dir / "response.json"
@@ -4920,6 +5286,29 @@ def build_backend_registry() -> BackendRegistry:
             "unqualified",
         ),
         execute_gemini_backend,
+    )
+    registry.register(
+        BackendDescriptor(
+            "muse",
+            BackendFamily.AGENT_CLI,
+            DiscoveryKind.EXECUTABLE,
+            "MUSE_BIN",
+            "muse",
+            BackendCapabilities(
+                ReadOnlyCapability.ENFORCED,
+                False,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                SourceIsolation.BACKEND_ENFORCED,
+            ),
+            "unqualified",
+        ),
+        execute_muse_backend,
     )
     registry.register(
         BackendDescriptor(
@@ -5771,7 +6160,9 @@ def run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
                     tools=",".join(tools) if cwd else "none",
                     pi_bin=getattr(args, "pi_bin", None),
                     thinking=thinking,
-                    reasoning_effort=reasoning_effort if transport == "openrouter" else None,
+                    reasoning_effort=(
+                        reasoning_effort if transport in REASONING_EFFORT_TRANSPORTS else None
+                    ),
                     prepared_contract=prepared_contract,
                 )
             )
@@ -7125,7 +7516,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--reasoning-effort",
         choices=sorted(OPENROUTER_REASONING_EFFORTS),
         default=None,
-        help="OpenRouter reasoning effort; overrides profile reasoning_effort",
+        help="OpenRouter or Muse reasoning effort; overrides profile reasoning_effort",
     )
     run.add_argument("--max-attempts", type=int, default=None)
     run.add_argument(
@@ -7156,7 +7547,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--response-contract", choices=sorted(RESPONSE_CONTRACTS), default="verdict")
     run.add_argument(
         "--transport",
-        choices=("llm", "codex", "openrouter", "agy", "gemini", "kiro", "pi"),
+        choices=("llm", "codex", "openrouter", "agy", "gemini", "kiro", "muse", "pi"),
         default="llm",
     )
     run.set_defaults(
@@ -7217,7 +7608,7 @@ def build_parser() -> argparse.ArgumentParser:
     range_review.add_argument("--model", help="model identifier for each chunk review")
     range_review.add_argument(
         "--transport",
-        choices=("llm", "codex", "openrouter", "agy", "gemini", "kiro", "pi"),
+        choices=("llm", "codex", "openrouter", "agy", "gemini", "kiro", "muse", "pi"),
         default="llm",
     )
     range_review.add_argument("--policy")

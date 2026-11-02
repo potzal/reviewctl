@@ -20,7 +20,9 @@ from reviewctl.filesystem import (
     read_confined_bytes,
 )
 
-SUPPORTED_TRANSPORTS = frozenset({"llm", "codex", "openrouter", "agy", "gemini", "kiro", "pi"})
+SUPPORTED_TRANSPORTS = frozenset(
+    {"llm", "codex", "openrouter", "agy", "gemini", "kiro", "muse", "pi"}
+)
 PRIVACY_RANK = {"personal": 0, "private": 1, "sensitive": 2}
 VISIBILITIES = frozenset({"public", "private", "unknown"})
 EXECUTION_MODES = frozenset({"local", "remote"})

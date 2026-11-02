@@ -163,7 +163,7 @@ An exact `[models."MODEL_ID"]` entry overrides its transport default. This
 scope is still advisory and does not authorize OpenRouter or make a backend a
 merge gate. The policy file and digest remain part of the receipt.
 
-Gemini, Pi, and Kiro proprietary routes require an explicit policy. Codex
+Gemini, Muse, Pi, and Kiro proprietary routes require an explicit policy. Codex
 retains its existing policy-optional proprietary route for backwards
 compatibility; when a policy is supplied, its exact model and transport entries
 are enforced for Codex too.
@@ -352,6 +352,34 @@ source_allowed = true
 
 The direct Gemini CLI transport is not the same as `agy`, which remains the
 Antigravity transport used by existing product-review routes.
+
+## Muse Code backend
+
+```bash
+reviewctl setup check --backend muse
+reviewctl run --review-id ID --route muse:muse-spark-1.3 --reasoning-effort low \
+  --response-contract verdict --prompt-file FILE --file SOURCE --source-class synthetic
+```
+
+The adapter runs `muse exec --json --preset empty` (`MUSE_BIN` overrides the
+executable) using the login Muse already holds; `MUSE_AUTH_PATH` is the only
+Muse-specific variable forwarded and auto-update is off for the run. The session
+has no tools, the workspace is empty, and the packet is the only input. Effort
+defaults to `high` and accepts `low`, `medium`, or `high` from
+`--reasoning-effort` or the profile's `reasoning_effort`.
+
+`request.json`, the raw `response.jsonl` event stream, `session.json`, `stderr.log`
+and `response.md` (only the final answer) are retained as attempt evidence. A run
+fails closed when a tool actually executed, when the observed model differs from
+the requested one, when usage evidence naming the billed model is missing or
+malformed, or when the stream lacks exactly one completed terminal event.
+`outputTokenLimitEnforced = false` is recorded because the CLI has no output cap.
+Proprietary source requires explicit authorization:
+
+```toml
+[transports.muse]
+source_allowed = true
+```
 
 ## Diagnose failures
 
