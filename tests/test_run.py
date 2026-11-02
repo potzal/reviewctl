@@ -1522,7 +1522,7 @@ def test_route_parser_accepts_kiro_and_lists_it_in_validation_errors() -> None:
         ValueError,
         match=(
             "^routes must use transport:model with transport in "
-            "llm, codex, openrouter, agy, gemini, kiro, pi$"
+            "llm, codex, openrouter, agy, gemini, kiro, muse, pi$"
         ),
     ):
         cli.parse_route("unknown:model")

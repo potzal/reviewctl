@@ -14,6 +14,7 @@ _CONTRACT_MODULES = {
     "test_github_contracts.py",
     "test_github_publisher.py",
     "test_github_source.py",
+    "test_muse_transport.py",
     "test_pi_transport.py",
     "test_range_review.py",
     "test_review_flow.py",

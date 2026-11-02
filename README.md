@@ -28,6 +28,7 @@ evidence features call external tools only when selected:
 | OpenRouter direct transport | `curl` and `OPENROUTER_API_KEY` |
 | Gemini/Antigravity transport | `agy` |
 | Gemini CLI transport | local `gemini` CLI; unqualified and advisory |
+| Muse Code transport | local `muse` CLI; tool-free `muse exec`, unqualified |
 | Sealed evidence | `age` |
 
 Missing optional tools produce a typed unavailable attempt; they never count

@@ -57,7 +57,7 @@ adapters do not decide acceptance. The controller alone owns policy, contract
 evaluation, acceptance, fallback, and receipt construction.
 
 Private experimental policies may authorize local transport defaults under
-`[transports.<name>]` for `kiro`, `gemini`, `pi`, and `codex`. An exact model
+`[transports.<name>]` for `kiro`, `gemini`, `muse`, `pi`, and `codex`. An exact model
 entry under `[models.<id>]` overrides that default. This permits a
 runtime-owned local inventory without publishing a roster; it does not open
 OpenRouter, resolve an otherwise unresolved identity, or qualify a backend.
@@ -76,6 +76,17 @@ kept as requested identity because the CLI may resolve an alias to another
 model, so the adapter deliberately does not claim resolved model identity or
 qualification. Gemini's CLI does not expose a portable output-token cap, so
 the receipt records the requested value as unenforced.
+
+Muse Code is a registered native agent-CLI adapter and remains unqualified. It
+runs `muse exec --json` with `--preset empty` from a disposable empty workspace
+and reads the frozen packet from a private file outside that workspace. The
+preset is the read-only boundary: `--disable-write --disable-shell` alone still
+leaves a `read_file` tool that can read outside the workspace (observed on Muse
+Code 1.4.14). The adapter keeps only the `run.terminal.completed` text as the
+answer and fails closed when any `tool.result` other than a refusal appears, or
+when the configured or billed model differs from the requested one. The Muse
+CLI does not expose an output-token cap, so the receipt records the requested
+value as unenforced.
 
 Kiro is a registered native agent-CLI adapter and remains unqualified. Its
 default executable is `kiro-cli`; `KIRO_BIN` overrides that executable.

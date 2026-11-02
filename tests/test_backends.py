@@ -138,7 +138,9 @@ def backend_request(tmp_path: Path) -> BackendRequest:
     )
 
 
-@pytest.mark.parametrize("transport", ["llm", "codex", "kiro", "openrouter", "agy", "gemini", "pi"])
+@pytest.mark.parametrize(
+    "transport", ["llm", "codex", "kiro", "muse", "openrouter", "agy", "gemini", "pi"]
+)
 def test_every_backend_forwards_the_exact_prepared_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -185,6 +187,7 @@ def test_build_backend_registry_has_exact_inventory_and_unqualified_descriptors(
         "gemini",
         "kiro",
         "llm",
+        "muse",
         "openrouter",
         "pi",
     )
@@ -293,6 +296,25 @@ def test_route_transports_match_registered_backend_names() -> None:
                 True,
                 True,
                 SourceIsolation.UNAVAILABLE,
+            ),
+        ),
+        (
+            "muse",
+            BackendFamily.AGENT_CLI,
+            DiscoveryKind.EXECUTABLE,
+            "MUSE_BIN",
+            "muse",
+            BackendCapabilities(
+                ReadOnlyCapability.ENFORCED,
+                False,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                SourceIsolation.BACKEND_ENFORCED,
             ),
         ),
         (
@@ -454,6 +476,7 @@ def test_execute_llm_backend_classifies_unsafe_runtime_database(
         ("AGY_BIN", "execute_agy_backend", "invoke_agy", "agy_bin"),
         ("GEMINI_BIN", "execute_gemini_backend", "invoke_gemini", "gemini_bin"),
         ("KIRO_BIN", "execute_kiro_backend", "invoke_kiro", "kiro_bin"),
+        ("MUSE_BIN", "execute_muse_backend", "invoke_muse", "muse_bin"),
         ("PI_BIN", "execute_pi_backend", "invoke_pi", "pi_bin"),
     ],
 )
@@ -620,6 +643,74 @@ def test_execute_codex_backend_persists_rejected_response_and_maps_evidence(
         23, "rejected output", expected_response, BackendEvidence(response=response_path)
     )
     assert_execution_has_transport_semantics_only(execution)
+
+
+def test_execute_muse_backend_invokes_headless_transport_and_maps_all_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = replace(backend_request(tmp_path), reasoning_effort="low")
+    expected_response = PersistedResponse("session", None, 10, 20, request.model, 30, "meta", "ok")
+    calls: dict[str, object] = {}
+
+    def fake_invoke_muse(**kwargs: object) -> tuple[int, str, PersistedResponse]:
+        calls.update(kwargs)
+        return 0, "", expected_response
+
+    request.attempt_dir.mkdir()
+    monkeypatch.delenv("MUSE_BIN", raising=False)
+    monkeypatch.setattr(cli, "invoke_muse", fake_invoke_muse)
+
+    execution = cli.execute_muse_backend(request)
+    request_path = request.attempt_dir / "request.json"
+    response_path = request.attempt_dir / "response.jsonl"
+    session_path = request.attempt_dir / "session.json"
+    final_response_path = request.attempt_dir / "response.md"
+    stderr_path = request.attempt_dir / "stderr.log"
+
+    assert calls == {
+        "muse_bin": "muse",
+        "prompt": request.prompt,
+        "model": request.model,
+        "files": list(request.files),
+        "max_output_tokens": request.max_output_tokens,
+        "response_contract": request.response_contract,
+        "timeout_seconds": request.timeout_seconds,
+        "request_path": request_path,
+        "response_path": response_path,
+        "session_path": session_path,
+        "diagnostic_path": stderr_path,
+        "reasoning_effort": "low",
+        "evidence_parent_identity": request.evidence_parent_identity,
+        "prepared_contract": request.prepared_contract,
+    }
+    assert final_response_path.read_text() == "ok"
+    assert execution == BackendExecution(
+        0,
+        "",
+        expected_response,
+        BackendEvidence(
+            request=request_path,
+            response=response_path,
+            session=session_path,
+            final_response=final_response_path,
+            stderr=stderr_path,
+        ),
+    )
+    assert_execution_has_transport_semantics_only(execution)
+
+
+def test_execute_muse_backend_omits_empty_final_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = backend_request(tmp_path)
+    request.attempt_dir.mkdir()
+    blank = PersistedResponse("", None, None, None, "", None, None, "")
+    monkeypatch.setattr(cli, "invoke_muse", lambda **_kwargs: (502, "rejected", blank))
+
+    execution = cli.execute_muse_backend(request)
+
+    assert execution.evidence.final_response is None
+    assert not (request.attempt_dir / "response.md").exists()
 
 
 def test_execute_gemini_backend_invokes_headless_transport_and_maps_all_evidence(
