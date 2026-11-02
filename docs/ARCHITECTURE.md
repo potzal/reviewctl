@@ -84,7 +84,8 @@ preset is the read-only boundary: `--disable-write --disable-shell` alone still
 leaves a `read_file` tool that can read outside the workspace (observed on Muse
 Code 1.4.14). The adapter keeps only the `run.terminal.completed` text as the
 answer and fails closed when any `tool.result` other than a refusal appears, or
-when the configured or billed model differs from the requested one. The Muse
+when the configured or billed model differs from the requested one, or when
+no valid usage event names the billed model. The Muse
 CLI does not expose an output-token cap, so the receipt records the requested
 value as unenforced.
 

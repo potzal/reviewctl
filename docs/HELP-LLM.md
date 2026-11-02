@@ -371,7 +371,8 @@ defaults to `high` and accepts `low`, `medium`, or `high` from
 `request.json`, the raw `response.jsonl` event stream, `session.json`, `stderr.log`
 and `response.md` (only the final answer) are retained as attempt evidence. A run
 fails closed when a tool actually executed, when the observed model differs from
-the requested one, or when the stream lacks exactly one completed terminal event.
+the requested one, when usage evidence naming the billed model is missing or
+malformed, or when the stream lacks exactly one completed terminal event.
 `outputTokenLimitEnforced = false` is recorded because the CLI has no output cap.
 Proprietary source requires explicit authorization:
 

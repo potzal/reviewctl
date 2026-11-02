@@ -3129,6 +3129,26 @@ class MuseRun:
     observed_models: tuple[dict[str, object], ...]
 
 
+def muse_billed_models(payload: object, model: str) -> tuple[dict[str, object], ...]:
+    """Require a usage event to name the billed model on every entry."""
+    entries = payload.get("models") if isinstance(payload, dict) else None
+    if (
+        not isinstance(entries, list)
+        or not entries
+        or not all(
+            isinstance(entry, dict) and isinstance(entry.get("model"), str) for entry in entries
+        )
+    ):
+        raise ValueError("Muse returned malformed usage evidence")
+    for entry in entries:
+        if entry["model"] != model:
+            raise ValueError(f"Muse ran a different model: {entry['model']}")
+    return tuple(
+        {key: entry.get(key) for key in ("input_tokens", "model", "output_tokens")}
+        for entry in entries
+    )
+
+
 def parse_muse_events(stdout: bytes, model: str) -> MuseRun:
     """Keep only the terminal answer, rejecting any stream that broke the review's limits."""
     events: list[object] = []
@@ -3168,17 +3188,8 @@ def parse_muse_events(stdout: bytes, model: str) -> MuseRun:
                     raise ValueError(f"Muse ran a different model: {model_id}")
                 configured_model = model_id
                 provider = payload.get("provider_id")
-        elif payload_type == "run.usage" and isinstance(payload, dict):
-            entries = payload.get("models")
-            if isinstance(entries, list):
-                observed_models = tuple(
-                    {key: entry.get(key) for key in ("input_tokens", "model", "output_tokens")}
-                    for entry in entries
-                    if isinstance(entry, dict)
-                )
-                for entry in observed_models:
-                    if entry["model"] != model:
-                        raise ValueError(f"Muse ran a different model: {entry['model']}")
+        elif payload_type == "run.usage":
+            observed_models = muse_billed_models(payload, model)
         elif payload_type.startswith("run.terminal."):
             terminals.append(event)
     if not terminals:
@@ -3204,6 +3215,8 @@ def parse_muse_events(stdout: bytes, model: str) -> MuseRun:
     session_id = stream.get("id") if isinstance(stream, dict) else None
     if not isinstance(session_id, str) or not session_id.strip():
         raise ValueError("Muse returned no session identifier")
+    if not observed_models:
+        raise ValueError("Muse returned no billed model evidence")
     return MuseRun(session_id, provider, response, observed_models)
 
 

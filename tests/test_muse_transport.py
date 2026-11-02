@@ -259,7 +259,11 @@ def test_invoke_muse_defaults_to_explicit_high_effort_and_strips_json_fence(
 ) -> None:
     fake = write_fake_muse(
         tmp_path,
-        stream(configured(), terminal('```json\n{"verdict": "approved", "findings": []}\n```')),
+        stream(
+            configured(),
+            usage(input_tokens=None, output_tokens=None),
+            terminal('```json\n{"verdict": "approved", "findings": []}\n```'),
+        ),
     )
 
     exit_code, _, response = invoke(tmp_path, str(fake), response_contract="findings-json")
@@ -280,9 +284,6 @@ def test_invoke_muse_tolerates_a_refused_tool_call_and_unreported_counters(tmp_p
             tool_result(
                 "tool unavailable: unknown tool `muse.read_file`. Session tool ids: (none)"
             ),
-            event("run.usage", {"models": "unexpected"}),
-            event("run.usage", []),
-            event("run.usage", {"models": ["unexpected"]}),
             event("run.model.configured", {"model_id": None}),
             event("", {}),
             usage(input_tokens="12", output_tokens=True),
@@ -308,6 +309,42 @@ def test_invoke_muse_tolerates_a_refused_tool_call_and_unreported_counters(tmp_p
             "Muse returned invalid JSONL",
         ),
         (stream(configured(), usage()), "Muse returned no terminal event"),
+        (stream(configured(), terminal()), "Muse returned no billed model evidence"),
+        (
+            stream(configured(), event("run.usage", []), terminal()),
+            "Muse returned malformed usage evidence",
+        ),
+        (
+            stream(configured(), event("run.usage", {"models": "unexpected"}), terminal()),
+            "Muse returned malformed usage evidence",
+        ),
+        (
+            stream(configured(), event("run.usage", {"models": []}), terminal()),
+            "Muse returned malformed usage evidence",
+        ),
+        (
+            stream(configured(), event("run.usage", {"models": ["unexpected"]}), terminal()),
+            "Muse returned malformed usage evidence",
+        ),
+        (
+            stream(configured(), event("run.usage", {"models": [{"input_tokens": 1}]}), terminal()),
+            "Muse returned malformed usage evidence",
+        ),
+        (
+            stream(
+                configured(),
+                event(
+                    "run.usage",
+                    {"models": [{"model": MODEL, "input_tokens": 1}, "unexpected"]},
+                ),
+                terminal(),
+            ),
+            "Muse returned malformed usage evidence",
+        ),
+        (
+            stream(configured(), usage(), event("run.usage", {"models": 1}), terminal()),
+            "Muse returned malformed usage evidence",
+        ),
         (stream(configured(), terminal(), terminal()), "Muse returned multiple terminal events"),
         (stream(configured(), terminal("", "failed")), "Muse run did not complete"),
         (
