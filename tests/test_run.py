@@ -347,8 +347,9 @@ def test_range_review_formal_mode_persists_incomplete_aggregate_on_failed_chunk(
     assert json.loads(verified.stdout)["valid"] is False
 
 
+@pytest.mark.parametrize("frozen", [False, True])
 def test_range_review_forwards_openrouter_reasoning_effort_to_each_chunk(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frozen: bool
 ) -> None:
     repository, base, head = make_range_cli_repository(tmp_path)
     manifest_path = tmp_path / "manifest.json"
@@ -389,6 +390,7 @@ def test_range_review_forwards_openrouter_reasoning_effort_to_each_chunk(
         ]
     )
     commands: list[list[str]] = []
+    monkeypatch.setattr(cli.sys, "frozen", frozen, raising=False)
     monkeypatch.setattr(
         cli,
         "_range_child_process",
@@ -396,6 +398,8 @@ def test_range_review_forwards_openrouter_reasoning_effort_to_each_chunk(
     )
 
     assert cli.run_range_review(parser, args) != 0
+    prefix = [sys.executable] if frozen else [sys.executable, "-m", "reviewctl"]
+    assert commands[0][: len(prefix) + 1] == [*prefix, "run"]
     assert commands[0][commands[0].index("--reasoning-effort") + 1] == "low"
 
 
