@@ -266,9 +266,7 @@ def test_read_confined_explicit_boundaries_and_text_limit(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize("limit", [-1, None, True, 1.5, 2**100])
-def test_read_confined_rejects_invalid_trusted_override_before_open(
-    tmp_path: Path, limit
-) -> None:
+def test_read_confined_rejects_invalid_trusted_override_before_open(tmp_path: Path, limit) -> None:
     with pytest.raises(ValueError, match="max_bytes"):
         filesystem.read_confined_bytes(tmp_path / "absent", max_bytes=limit)
 
