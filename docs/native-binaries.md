@@ -165,3 +165,15 @@ deployment authorization remain distinct checks.
 
 References: [PyInstaller operating model](https://pyinstaller.org/en/stable/operating-mode.html)
 and [native build options](https://pyinstaller.org/en/stable/usage.html).
+
+## 0.3.4 bounded-read qualification
+
+Native artifacts for 0.3.4 must be rebuilt from the exact committed source;
+existing 0.3.3 binaries do not acquire the verifier read bound from an updated
+receipt or documentation. Before native build/smoke qualification, run
+`tests/test_filesystem.py` and `tests/test_run_repository.py`, including sparse
+oversized evidence and growth after the descriptor-size check. The default is
+64 MiB per confined byte/text read. Oversized evidence must produce verification
+failure, never a valid receipt result. Receipt fields cannot override this bound.
+The source suite proves the Python contract on its recorded platform; qualify
+each native executable separately and retain its source revision and digest.

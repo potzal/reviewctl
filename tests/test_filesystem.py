@@ -237,3 +237,103 @@ def test_confined_regular_close_error_does_not_replace_a_primary_error(
         with filesystem.confined_regular_descriptor(path, os.O_RDONLY):
             pass
     assert close_failures == 2
+
+
+def test_read_confined_rejects_sparse_oversize_before_stream_allocation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "oversized-evidence"
+    with path.open("wb") as stream:
+        stream.truncate(64 * 1024 * 1024 + 1)
+
+    def must_not_open_stream(*args, **kwargs):
+        raise AssertionError("oversized descriptor must be rejected before reading")
+
+    monkeypatch.setattr(filesystem.os, "fdopen", must_not_open_stream)
+    with pytest.raises(OSError, match="byte limit"):
+        filesystem.read_confined_bytes(path)
+
+
+def test_read_confined_explicit_boundaries_and_text_limit(tmp_path: Path) -> None:
+    path = tmp_path / "evidence"
+    path.write_bytes(b"abc")
+    assert filesystem.read_confined_bytes(path, max_bytes=3) == b"abc"
+    assert filesystem.read_confined_text(path, max_bytes=3) == "abc"
+    with pytest.raises(OSError, match="byte limit"):
+        filesystem.read_confined_text(path, max_bytes=2)
+    path.write_bytes(b"")
+    assert filesystem.read_confined_bytes(path, max_bytes=0) == b""
+
+
+@pytest.mark.parametrize("limit", [-1, None, True, 1.5, 2**100])
+def test_read_confined_rejects_invalid_trusted_override_before_open(tmp_path: Path, limit) -> None:
+    with pytest.raises(ValueError, match="max_bytes"):
+        filesystem.read_confined_bytes(tmp_path / "absent", max_bytes=limit)
+
+
+@pytest.mark.parametrize(
+    "change", ["grow_before_read", "grow_within_limit", "grow_after_read", "shrink_after_read"]
+)
+def test_read_confined_detects_size_changes_and_never_requests_unbounded_read(
+    tmp_path: Path, monkeypatch, change
+) -> None:
+    path = tmp_path / "mutable-evidence"
+    path.write_bytes(b"abc")
+    real_fdopen = filesystem.os.fdopen
+    requested = []
+
+    class ChangingStream:
+        def __init__(self, descriptor, mode):
+            self.stream = real_fdopen(descriptor, mode)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.stream.close()
+
+        def read(self, size=-1):
+            requested.append(size)
+            assert size == 5, "read must always be bounded by max_bytes + 1"
+            if change == "grow_before_read":
+                with path.open("ab") as writer:
+                    writer.truncate(32 * 1024 * 1024)
+            if change == "grow_within_limit":
+                with path.open("ab") as writer:
+                    writer.write(b"x")
+            data = self.stream.read(size)
+            if change == "grow_after_read":
+                with path.open("ab") as writer:
+                    writer.truncate(32 * 1024 * 1024)
+            elif change == "shrink_after_read":
+                path.write_bytes(b"")
+            return data
+
+    monkeypatch.setattr(filesystem.os, "fdopen", ChangingStream)
+    with pytest.raises(OSError, match="byte limit|changed while reading"):
+        filesystem.read_confined_bytes(path, max_bytes=4)
+    assert requested == [5]
+
+
+def test_read_confined_rejects_fifo_and_symlink_without_blocking(tmp_path: Path) -> None:
+    import subprocess
+
+    regular = tmp_path / "regular"
+    regular.write_bytes(b"safe")
+    symlink = tmp_path / "symlink"
+    symlink.symlink_to(regular)
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    code = (
+        "from pathlib import Path; from reviewctl.filesystem import read_confined_bytes; "
+        "read_confined_bytes(Path(__import__('sys').argv[1]))"
+    )
+    for path in [fifo, symlink]:
+        result = subprocess.run(
+            [filesystem.sys.executable, "-c", code, str(path)],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert b"OSError" in result.stderr

@@ -65,3 +65,27 @@ source boundaries, and expected outcomes belong to each organization's private
 evidence store. No successful command alone establishes merge approval. Merge
 approval requires the project policy's required tests and independently verified
 review findings.
+
+## Bounded verifier evidence reads
+
+Version 0.3.4 bounds each descriptor-confined byte or text read to 64 MiB by
+default. Oversized regular files are rejected from `fstat` before allocating a
+read buffer; reads request at most the limit plus one byte and reject observed
+size changes before JSON parsing or digest acceptance. FIFO and symlink rejection
+continues to use descriptor confinement and nonblocking opens. The Python API's
+`max_bytes` keyword is for explicitly trusted callers; receipt metadata and CLI
+inputs cannot raise the limit. Existing callers, including configuration,
+checkpoints, SQLite snapshots and repository prompt/response evidence, use the
+default. Artifacts over that limit now fail closed.
+
+Run the deterministic regressions without provider credentials:
+
+```sh
+uv run pytest tests/test_filesystem.py tests/test_run_repository.py
+```
+
+The fixtures include a sparse file larger than 64 MiB, a file that grows after
+the initial descriptor-size check, shrinking files, exact/empty boundaries,
+invalid overrides, FIFO/symlink rejection, and normal repository receipts. This
+is a per-read byte bound, not a cumulative-memory quota, path authorization
+allowlist, process sandbox, immutable-file guarantee, or model qualification.
