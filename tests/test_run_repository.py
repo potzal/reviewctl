@@ -424,3 +424,25 @@ def test_live_verify_missing_checkout(tmp_path):
     result = run_cli(*arguments(tmp_path, repository, write_fake_pi(tmp_path)))
     path = Path(result.stdout.strip()) / "receipt.json"
     assert run_cli("verify", str(path), "--cwd", str(tmp_path / "missing")).returncode == 1
+
+
+@pytest.mark.parametrize("artifact", ["prompt", "request"])
+def test_verify_rejects_oversized_repository_evidence_before_digest_or_json(tmp_path, artifact):
+    repository, _, _ = make_range_cli_repository(tmp_path)
+    binary = write_fake_pi(tmp_path)
+    result = run_cli(*arguments(tmp_path, repository, binary))
+    assert result.returncode == 0, result.stderr
+    receipt_path = Path(result.stdout.strip()) / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    path = Path(
+        receipt["extension.repositoryPrompt"]["path"]
+        if artifact == "prompt"
+        else receipt["attempts"][0]["evidence"]["request"]
+    )
+    with path.open("ab") as stream:
+        stream.truncate(64 * 1024 * 1024 + 1)
+    verified = run_cli("verify", str(receipt_path))
+    assert verified.returncode == 1
+    report = json.loads(verified.stdout)
+    assert report["valid"] is False
+    assert report["violations"] == ["repository-evidence"]

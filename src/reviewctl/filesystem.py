@@ -8,6 +8,8 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
+DEFAULT_MAX_READ_BYTES = 64 * 1024 * 1024
+
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _MACOS_SYSTEM_ALIASES = {
     Path("/etc"): Path("/private/etc"),
@@ -192,22 +194,39 @@ def confined_regular_descriptor(
 
 
 def read_confined_bytes(
-    path: Path, *, expected_parent_identity: tuple[int, int] | None = None
+    path: Path,
+    *,
+    expected_parent_identity: tuple[int, int] | None = None,
+    max_bytes: int = DEFAULT_MAX_READ_BYTES,
 ) -> bytes:
-    """Read bytes from a confined regular-file descriptor."""
+    """Read a bounded regular file; only trusted callers may override the limit."""
+    if type(max_bytes) is not int or not 0 <= max_bytes < sys.maxsize:
+        raise ValueError("max_bytes must be a nonnegative bounded integer")
     with confined_regular_descriptor(
         path,
         os.O_RDONLY,
         expected_parent_identity=expected_parent_identity,
     ) as descriptor:
+        before = os.fstat(descriptor).st_size
+        if before > max_bytes:
+            raise OSError("confined file exceeds byte limit")
         with os.fdopen(os.dup(descriptor), "rb") as stream:
-            return stream.read()
+            data = stream.read(max_bytes + 1)
+        after = os.fstat(descriptor).st_size
+        if len(data) > max_bytes or after > max_bytes:
+            raise OSError("confined file exceeds byte limit")
+        if len(data) != before or after != before:
+            raise OSError("confined file changed while reading")
+        return data
 
 
 def read_confined_text(
-    path: Path, *, expected_parent_identity: tuple[int, int] | None = None
+    path: Path,
+    *,
+    expected_parent_identity: tuple[int, int] | None = None,
+    max_bytes: int = DEFAULT_MAX_READ_BYTES,
 ) -> str:
-    """Read UTF-8 text from a confined regular-file descriptor."""
-    return read_confined_bytes(path, expected_parent_identity=expected_parent_identity).decode(
-        "utf-8"
-    )
+    """Read bounded UTF-8 text from a confined regular-file descriptor."""
+    return read_confined_bytes(
+        path, expected_parent_identity=expected_parent_identity, max_bytes=max_bytes
+    ).decode("utf-8")
