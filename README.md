@@ -8,7 +8,13 @@ repository. It uses `llm` as a transport, not as the source of review governance
 
 ## Install
 
-Python 3.14 or newer is required.
+Standalone executables bundle Python and do not require a separate Python
+installation. See [native binaries](docs/native-binaries.md) to build, verify,
+and install one, including the current Linux/macOS proof scope and Windows
+roadmap. The manual native-build workflow uploads build artifacts; the release
+workflow currently publishes Python wheels and source archives only.
+
+For installation as a Python tool, Python 3.14 or newer is required.
 
 ```bash
 uv tool install git+https://github.com/potzal/reviewctl.git
@@ -23,6 +29,7 @@ evidence features call external tools only when selected:
 
 | Feature | External requirement |
 | --- | --- |
+| Source Git provenance and Git range operations | `git` |
 | `llm` transport | `llm` with the configured provider plugin |
 | Codex transport | Codex CLI; macOS `sandbox-exec` for proprietary-source isolation |
 | OpenRouter direct transport | `curl` and `OPENROUTER_API_KEY` |
@@ -31,8 +38,7 @@ evidence features call external tools only when selected:
 | Muse Code transport | local `muse` CLI; tool-free `muse exec`, unqualified |
 | Sealed evidence | `age` |
 
-Missing optional tools produce a typed unavailable attempt; they never count
-as an accepted review.
+Missing optional tools and setup failures never count as an accepted review.
 
 Canonical receipts can optionally be stored in a configured Potzal evidence
 service with `reviewctl receipts push` and recovered with `reviewctl receipts
@@ -352,6 +358,17 @@ For coding agents and local automation, `reviewctl help-llm --format json`
 returns machine-readable commands, failure results, contract violations, and
 recovery guidance. The same material is available in
 [Help for LLMs](docs/HELP-LLM.md).
+
+```bash
+reviewctl --version
+reviewctl --help
+reviewctl help-llm --format json
+```
+
+Reviewctl exposes its CLI and Python API; this distribution does not provide
+an MCP server or an MCP connection command. Agents can invoke the executable
+and consume its JSON output. Packaging the CLI does not configure an agent's
+MCP servers, providers, credentials, or review policy.
 
 Read [the architecture and canonical vocabulary](docs/ARCHITECTURE.md),
 [the current project handoff and roadmap](docs/HANDOFF.md),

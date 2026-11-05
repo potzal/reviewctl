@@ -1941,8 +1941,7 @@ def run_range_review(parser: argparse.ArgumentParser, args: argparse.Namespace) 
             prompt_path.write_text(chunk_prompt)
             command = [
                 sys.executable,
-                "-m",
-                "reviewctl",
+                *(() if getattr(sys, "frozen", False) else ("-m", "reviewctl")),
                 "run",
                 "--review-id",
                 f"{args.review_id}.chunk-{index}",
@@ -7467,6 +7466,7 @@ def run_tournament(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="reviewctl")
+    parser.add_argument("--version", action="version", version=f"reviewctl {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="execute bounded isolated review attempts")
     run.add_argument("--review-id", required=True)
